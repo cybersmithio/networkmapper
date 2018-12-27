@@ -28,107 +28,120 @@ import plotly
 import plotly.graph_objs as go
 import networkx as nx
 
-def DownloadAssetInfoIO(DEBUG,tio):
-    ipv4list=[]
-    ipv6list=[]
+def DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets):
+    TIO=False
+    if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
+        TIO=True
 
+    if TIO:
+        for asset in conn.assets.list():
+            IPV4=False
+            IPv6=False
+            if DEBUG:
+                print("Asset ID:",asset['id'])
+                print("Asset IPv4 addresses:", asset['ipv4']) if 'ipv4' in asset else print("")
+                print("Asset info:",asset)
+            if 'ipv4' in asset:
+                if DEBUG:
+                    if len(asset['ipv4']) > 1:
+                        print("This is a multi-homed asset")
+                IPV4=True
+                for i in asset['ipv4']:
+                    ipaddresses.append(tuple([len(ipaddresses),ipaddress.IPv4Address(i)]))
+            if 'ipv6' in asset:
+                if DEBUG:
+                    if len(asset['ipv6']) > 1:
+                        print("This is a multi-homed asset")
+                IPV6=True
+                for i in asset['ipv6']:
+                    ipaddresses.append(tuple([len(ipaddresses), ipaddress.IPv6Address(i)]))
+            if IPV4 and IPV6:
+                assets.append(tuple([len(assets),asset['id'],asset['ipv4']+asset['ipv6']]))
+            elif IPV4 and not IPV6:
+                assets.append(tuple([len(assets),asset['id'],asset['ipv4']]))
+            elif IPV6 and not IPV4:
+                assets.append(tuple([len(assets),asset['id'],asset['ipv6']]))
+            else:
+                if DEBUG:
+                    print("This asset had no IP addresses.  Weird, right?!")
+    else:
+        try:
+            assets = sc.analysis.vulns(tool="sumip")
 
-    for asset in tio.assets.list():
-        if DEBUG:
-            print("Asset ID:",asset['id'])
-            print("Asset IPv4 addresses:", asset['ipv4']) if 'ipv4' in asset else print("")
-            print("Asset info:",asset)
-        if 'ipv4' in asset:
+        except:
+            assets = []
+            print("Error getting ip list", sys.exc_info()[0], sys.exc_info()[1])
+
+        for asset in assets:
             if DEBUG:
-                if len(asset['ipv4']) > 1:
-                    print("This is a multi-homed asset")
-            for i in asset['ipv4']:
-                ipv4list.append(i)
-        if 'ipv6' in asset:
-            if DEBUG:
-                if len(asset['ipv6']) > 1:
-                    print("This is a multi-homed asset")
-            for i in asset['ipv6']:
-                ipv6list.append(i)
+                print("Asset info:", asset)
+            if 'ip' in asset:
+                ipaddresses.append(tuple([len(ipaddresses), ipaddress.IPv4Address(asset['ip'])]))
 
     if DEBUG:
-        print("List IPv4 addresses found:",ipv4list)
-        print("List IPv6 addresses found:",ipv6list)
+        print("\n\n\n")
+        print("Assets found:",assets)
+        print("IP addresses found:",ipaddresses)
+        print("\n\n\n")
 
-    return(ipv4list,ipv6list)
+    return(ipaddresses,assets)
 
-
-def DownloadAssetInfoSC(DEBUG,sc):
-    ipv4list=[]
-    ipv6list=[]
-
-    try:
-        assets=sc.analysis.vulns(tool="sumip")
-
-    except:
-        assets=[]
-        print("Error getting ip list", sys.exc_info()[0], sys.exc_info()[1])
-
-    for asset in assets:
-        if DEBUG:
-            print("Asset info:",asset)
-        if 'ip' in asset:
-            ipv4list.append(asset['ip'])
-
-    if DEBUG:
-        print("List IPv4 addresses found:",ipv4list)
-        print("List IPv6 addresses found:",ipv6list)
-
-    return(ipv4list,ipv6list)
 
 #Takes the subnets and merges them, ensuring no duplicates between the two
 #The orig should be a list of subnets (i.e. IPv4Network types)
 #the new should be an IPv4Network type
 def MergeSubnets(orig,new):
+
     FOUND=False
     for i in orig:
-        if i == new:
+        (index,subnet)=i
+        if subnet == new:
             FOUND=True
 
     #If we didn't find a match, then add it to the orig
     if FOUND == False:
-        orig.append(new)
+        orig.append(tuple([len(orig), new]))
 
     return(orig)
 
 #Takes the gateways and merges them, ensuring no duplicates between the two
 #The orig should be a list of gateways (i.e. IPv4Address types with a /32)
-#the new should be an IPv4Address type
+#the new should be an IPv4Address or IPv6Address type
 def MergeGateways(orig,new):
+
     FOUND=False
     for i in orig:
-        if i == new:
+        (index,gw)=i
+        if gw == new:
             FOUND=True
 
     #If we didn't find a match, then add it to the orig
     if FOUND == False:
-        orig.append(new)
+        orig.append(tuple([len(orig), new]))
 
     return(orig)
 
 #Takes the routes and merges them, ensuring no duplicates between the two
 #The orig should be a list of routes (i.e. A tuple of an IPv4Network and an IPv4Address)
-#the new should be a tuple of an IPv4Network and an IPv4Address
-def MergeRoutes(orig,new):
+#the newnet should be an IPv4Network or IPv6Network
+#the newgw should be an IPv4Address or IPv6Address
+def MergeRoutes(orig,newnet,newgw):
+
     FOUND=False
     for i in orig:
-        if i == new:
+        (index,subnet,gw)=i
+        if subnet == newnet and gw == newgw:
             FOUND=True
 
     #If we didn't find a match, then add it to the orig
     if FOUND == False:
-        orig.append(new)
+        orig.append(tuple([len(orig), newnet, newgw]))
 
     return(orig)
 
 
 #Gathers subnet info from either SecurityCenter or Tenable.io from Plugin 24272
-def GetPlugin24272(DEBUG,conn,subnets,gateways,routes):
+def GetPlugin24272(DEBUG,conn,ipaddresses,assets,subnets,gateways,routes):
     if DEBUG:
         print("Parsing information from all plugin ID 24272")
 
@@ -156,35 +169,16 @@ def GetPlugin24272(DEBUG,conn,subnets,gateways,routes):
 
     if DEBUG:
         print("Summary of information collected from all instances of Plugin 24272")
+        print("Type:",type(subnets))
         print("Subnets:",subnets)
+        print("Type:",type(subnets))
         print("Gateways:",gateways)
+        print("Type:",type(subnets))
         print("Routes:",routes)
 
-    return(True)
+        return(ipaddresses, assets, subnets, gateways, routes)
 
 
-#Gathers subnet info from SecurityCenter from Plugin 24272
-def SCPlugin24272(DEBUG,sc,subnets,gateways,routes):
-    if DEBUG:
-        print("Parsing information from all plugin ID 24272")
-    try:
-        results=sc.analysis.vulns(('pluginID','=','24272'),tool="vulndetails")
-    except:
-        results=[]
-        print("Error getting ip list", sys.exc_info()[0], sys.exc_info()[1])
-
-    for i in results:
-        if DEBUG:
-            print("Result info:",i)
-        (subnets,gateways,routes)=ParsePlugin24272(DEBUG,i['pluginText'],subnets,gateways,routes)
-
-    if DEBUG:
-        print("Summary of information collected from all instances of Plugin 24272")
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Routes:",routes)
-
-    return(True)
 
 
 #Takes the text which should be from a Plugin Output for Plugin ID 24272, and parses it.
@@ -220,11 +214,12 @@ def ParsePlugin24272(DEBUG,text,subnets,gateways,routes):
             if DEBUG:
                 print("Saving subnet:")
             if n1 != defaultroute:
-                subnets=MergeSubnets(subnets,n1)
+                subnets = MergeSubnets(subnets, n1)
             if not gw=="0.0.0.0":
                 #Only save the gateway and route if the gateway is not 0.0.0.0
-                gateways=MergeGateways(gateways,ipaddress.IPv4Address(gw))
-                routes=MergeRoutes(routes,(n1,ipaddress.IPv4Address(gw)))
+
+                gateways.append(tuple([len(gateways),ipaddress.IPv4Address(gw)]))
+                routes = MergeRoutes(routes, n1,ipaddress.IPv4Address(gw))
 
     if DEBUG:
         print("Summary of information collected")
@@ -253,7 +248,7 @@ def GetPlugin10663(DEBUG,conn,subnets,gateways,routes):
             results = conn.analysis.vulns(('pluginID', '=', '10663'), tool="vulndetails")
     except:
         results=[]
-        print("Error getting ip list", sys.exc_info()[0], sys.exc_info()[1])
+        print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
 
     for i in results:
         if DEBUG:
@@ -269,31 +264,7 @@ def GetPlugin10663(DEBUG,conn,subnets,gateways,routes):
         print("Gateways:",gateways)
         print("Routes:",routes)
 
-    return(True)
-
-#Gathers subnet info from SecurityCenter from Plugin 10663
-def SCPlugin10663(DEBUG,sc,subnets,gateways,routes):
-    if DEBUG:
-        print("Parsing information from all plugin ID 10663")
-
-    try:
-        results=sc.analysis.vulns(('pluginID','=','10663'),tool="vulndetails")
-    except:
-        results=[]
-        print("Error getting ip list", sys.exc_info()[0], sys.exc_info()[1])
-
-    for i in results:
-        if DEBUG:
-            print("Result info:",i)
-        (subnets,gateways,routes)=ParsePlugin10663(DEBUG,i['pluginText'],subnets,gateways,routes)
-
-    if DEBUG:
-        print("Summary of information collected from all instances of Plugin 10663")
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Routes:",routes)
-
-    return(True)
+    return(subnets,gateways,routes)
 
 
 #Takes the text which should be from a Plugin Output for Plugin ID 24272, and parses it.
@@ -324,26 +295,72 @@ def ParsePlugin10663(DEBUG,text,subnets,gateways,routes):
         s1 = ipaddress.ip_network(ipaddr+"/"+netmask,strict=False)
         subnets=MergeSubnets(subnets,s1)
         if gw != "":
-            r1=(s1,ipaddress.IPv4Address(gw))
-            routes=MergeRoutes(routes,r1)
+            routes=MergeRoutes(routes,s1,ipaddress.IPv4Address(gw))
+
+
+    return(subnets,gateways,routes)
+
+
+#Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10287
+def GetPlugin10287(DEBUG,conn,subnets,gateways,routes):
+    if DEBUG:
+        print("Parsing information from all plugin ID 10287")
+
+    #Assume we're using a SecurityCenter connection unless we know the connection is for Tenable.io
+    TIO=False
+    if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
+        TIO=True
+
+    try:
+        if TIO:
+            results=conn.workbenches.vuln_outputs(10287)
+        else:
+            results = conn.analysis.vulns(('pluginID', '=', '10287'), tool="vulndetails")
+    except:
+        results=[]
+        print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
+
+    for i in results:
+        if DEBUG:
+            print("Result info:",i)
+        if TIO:
+            (subnets, gateways, routes) = ParsePlugin10287(DEBUG, i['plugin_output'], subnets, gateways, routes)
+        else:
+            (subnets,gateways,routes)=ParsePlugin10287(DEBUG,i['pluginText'],subnets,gateways,routes)
+
+    if DEBUG:
+        print("Summary of information collected from all instances of Plugin 10287")
+        print("Subnets:",subnets)
+        print("Gateways:",gateways)
+        print("Routes:",routes)
+
+    return(subnets,gateways,routes)
+
+
+#Takes the text which should be from a Plugin Output for Plugin ID 10287, and parses it.
+#Merges the data with the existing subnets, gateways, and routes lists, and then returns those.
+def ParsePlugin10287(DEBUG,text,subnets,gateways,routes):
+    if DEBUG:
+        print("Parsing plugin text from 10287",text)
+
+
 
     return(subnets,gateways,routes)
 
 
 
+
 def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets):
-    if DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets) == False:
-        print("There was a problem retrieving information from SecurityCenter")
-        exit(-1)
+    (ipaddresses, assets)=DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets)
 
     #Gather interface enumeration
-    GetPlugin24272(DEBUG,conn,ipaddresses,assets,subnets,gateways,routes)
+    (ipaddresses,assets,subnets,gateways,routes)=GetPlugin24272(DEBUG,conn,ipaddresses,assets,subnets,gateways,routes)
 
     #Gather info from DHCP
-    GetPlugin10663(DEBUG,conn,subnets,gateways,routes)
+    (subnets, gateways, routes)=GetPlugin10663(DEBUG,conn,subnets,gateways,routes)
 
     #Gather traceroute info
-    GetPlugin10287(DEBUG,conn,subnets,gateways,routes)
+    (subnets, gateways, routes)=GetPlugin10287(DEBUG,conn,subnets,gateways,routes)
 
 
     if DEBUG:
@@ -387,7 +404,7 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
 
     return(tio)
 
-def CreateMapPlot(DEBUG,subnets,gateways,routes,ipv4list,ipv6list):
+def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
     connectorthickness = 0.5
     connectorcolor = '#000'
     nodesize = 10
@@ -403,13 +420,13 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipv4list,ipv6list):
     y=0
     subnettext=[]
     nodecolor=[]
-    for i in subnets:
+    for (index,subnet) in subnets:
         #New subnet, let's add a node.
         G.add_node(nodecount,pos=(0,y))
         if DEBUG:
-            print("New node",nodecount," is the subnet",i)
+            print("New node",nodecount," is the subnet",subnet)
         subnetnode=nodecount
-        subnettext+= tuple([i])
+        subnettext+= tuple([subnet])
         nodecolor += tuple(["grey"])
         #In case there is no gateway, reconnect the hosts back to the subnet
         gatewaynode=nodecount
@@ -421,18 +438,18 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipv4list,ipv6list):
         x = 0
 
         #See if there are any gateways on this subnet, and if so, add nodes at the same y position
-        for j in gateways:
+        for (gwindex,gw) in gateways:
             if DEBUG:
-                print("Checking if "+str(j)+"/32 is within",i)
-            if ipaddress.ip_network(i).overlaps(ipaddress.ip_network(str(j)+"/32")):
+                print("Checking if "+str(gw)+"/32 is within",subnet)
+            if ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(str(gw)+"/32")):
                 x=x+xoffset
                 if DEBUG:
-                    print("The gateway",j,"belongs to this subnet",i)
+                    print("The gateway",gw,"belongs to this subnet",subnet)
                 G.add_node(nodecount,pos=(x,y+gatewayyoffset))
-                subnettext += tuple([j])
+                subnettext += tuple([gw])
                 nodecolor += tuple(["red"])
                 if DEBUG:
-                    print("New node", nodecount, " is the gateway", j)
+                    print("New node", nodecount, " is the gateway", gw)
                 if DEBUG:
                     print("Connecting nodes "+str(subnetnode)+" and "+str(nodecount))
                 G.add_edge(subnetnode,nodecount)
@@ -441,32 +458,60 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipv4list,ipv6list):
                 nodecount = nodecount + 1
 
         #See if there are any hosts on this subnet, and if so, add nodes at the same y position.
-        for j in ipv4list:
+        #TODO: make this work with IPv6
+        for (ipindex,ip) in ipaddresses:
             if DEBUG:
-                print("Checking if "+str(j)+"/32 is within",i)
-            if ipaddress.ip_network(i).overlaps(ipaddress.ip_network(str(j)+"/32")):
-                x=x+xoffset
-                if DEBUG:
-                    print("The host",j,"belongs to this subnet",i)
-                #First add an anchor node that will be used to connect back to the gateway on the horizontal
-                G.add_node(nodecount,pos=(x,y+gatewayyoffset))
-                subnettext += tuple([""])
-                nodecolor += tuple(["white"])
-                G.add_edge(gatewaynode,nodecount)
-                nodecount = nodecount + 1
+                print("Checking if "+str(ip)+" is within",subnet)
+            if isinstance(ip, ipaddress.IPv4Address):
+                if ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(str(ip)+"/32")):
+                    x=x+xoffset
+                    if DEBUG:
+                        print("The host",ip,"belongs to this subnet",subnet)
+                    #First add an anchor node that will be used to connect back to the gateway on the horizontal
+                    G.add_node(nodecount,pos=(x,y+gatewayyoffset))
+                    subnettext += tuple([""])
+                    nodecolor += tuple(["white"])
+                    G.add_edge(gatewaynode,nodecount)
+                    nodecount = nodecount + 1
 
-                #Now add the actual host
-                if DEBUG:
-                    print("New node", nodecount, " is the host", j)
-                G.add_node(nodecount,pos=(x,y+hostyoffset))
-                subnettext += tuple([""])
-                nodecolor += tuple(["blue"])
+                    #Now add the actual host
+                    if DEBUG:
+                        print("New node", nodecount, " is the host", ip)
+                    G.add_node(nodecount,pos=(x,y+hostyoffset))
+                    subnettext += tuple([""])
+                    nodecolor += tuple(["blue"])
 
-                if DEBUG:
-                    print("Connecting nodes "+str(gatewaynode)+" and "+str(nodecount)+" with a right angle")
-                G.add_edge(nodecount-1,nodecount)
-                # Done all the configuration needed for this node, so increment to the next
-                nodecount = nodecount + 1
+                    if DEBUG:
+                        print("Connecting nodes "+str(gatewaynode)+" and "+str(nodecount)+" with a right angle")
+                    G.add_edge(nodecount-1,nodecount)
+                    # Done all the configuration needed for this node, so increment to the next
+                    nodecount = nodecount + 1
+            elif isinstance(ip, ipaddress.IPv6Address):
+                if ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(str(ip) + "/128")):
+                    x = x + xoffset
+                    if DEBUG:
+                        print("The host", ip, "belongs to this subnet", subnet)
+                    # First add an anchor node that will be used to connect back to the gateway on the horizontal
+                    G.add_node(nodecount, pos=(x, y + gatewayyoffset))
+                    subnettext += tuple([""])
+                    nodecolor += tuple(["white"])
+                    G.add_edge(gatewaynode, nodecount)
+                    nodecount = nodecount + 1
+
+                    # Now add the actual host
+                    if DEBUG:
+                        print("New node", nodecount, " is the host", ip)
+                    G.add_node(nodecount, pos=(x, y + hostyoffset))
+                    subnettext += tuple([""])
+                    nodecolor += tuple(["blue"])
+
+                    if DEBUG:
+                        print("Connecting nodes " + str(gatewaynode) + " and " + str(nodecount) + " with a right angle")
+                    G.add_edge(nodecount - 1, nodecount)
+                    # Done all the configuration needed for this node, so increment to the next
+                    nodecount = nodecount + 1
+            else:
+                print("No idea what this address is:",ip)
 
 
         y=y+subnetyoffset
@@ -555,6 +600,128 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipv4list,ipv6list):
                         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
 
     plotly.offline.plot(fig, auto_open=True)
+
+def CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets):
+    connectorthickness = 0.5
+    connectorcolor = '#000'
+    nodesize = 10
+    xoffset = 0.05
+    subnetyoffset= -0.1
+    gatewayyoffset = -0.02
+    hostyoffset = -0.04
+
+    # build a blank graph
+    G = nx.Graph()
+
+    nodecount=0
+    y=0
+    subnettext=[]
+    nodecolor=[]
+
+    #Go through all the subnets and put a node on the graph
+    for (index,subnet) in subnets:
+
+        #New subnet, let's add a node.
+        G.add_node(index,pos=(0,y))
+        if DEBUG:
+            print("New node",nodecount," is the subnet",subnet)
+        subnetnode=nodecount
+        subnettext+= tuple([subnet])
+        nodecolor += tuple(["grey"])
+        #In case there is no gateway, reconnect the hosts back to the subnet
+        gatewaynode=nodecount
+
+        #Done all the configuration needed for this node, so increment to the next
+        nodecount=nodecount+1
+
+        y=y+subnetyoffset
+
+
+    pos = nx.get_node_attributes(G, 'pos')
+
+    dmin = 1
+    ncenter = 0
+    for n in pos:
+        x, y = pos[n]
+        d = (x - 0.5) ** 2 + (y - 0.5) ** 2
+        if d < dmin:
+            ncenter = n
+            dmin = d
+
+    p = nx.single_source_shortest_path_length(G, ncenter)
+
+    edge_trace = go.Scatter(
+        x=[],
+        y=[],
+        line=dict(width=connectorthickness, color=connectorcolor),
+        hoverinfo='none',
+        mode='lines')
+
+    for edge in G.edges():
+        x0, y0 = G.node[edge[0]]['pos']
+        x1, y1 = G.node[edge[1]]['pos']
+        # print("x0=",x0)
+        # print("y0=",y0)
+        # print("x1=",x1)
+        # print("y1=",y1)
+        edge_trace['x'] += tuple([x0, x1, None])
+        edge_trace['y'] += tuple([y0, y1, None])
+
+    node_trace = go.Scatter(
+        x=[],
+        y=[],
+        text=subnettext,
+        textposition='bottom center',
+        hovertext=subnettext,
+        mode='markers+text',
+        hoverinfo='text',
+        marker=dict(
+            showscale=True,
+            # colorscale options
+            # 'Greys' | 'YlGnBu' | 'Greens' | 'YlOrRd' | 'Bluered' | 'RdBu' |
+            # 'Reds' | 'Blues' | 'Picnic' | 'Rainbow' | 'Portland' | 'Jet' |
+            # 'Hot' | 'Blackbody' | 'Earth' | 'Electric' | 'Viridis' |
+            colorscale='YlGnBu',
+            reversescale=True,
+            color=nodecolor,
+
+            size=nodesize,
+            colorbar=dict(
+                thickness=15,
+                title='Node Connections',
+                xanchor='left',
+                titleside='right'
+            ),
+            line=dict(width=2)))
+
+    for node in G.nodes():
+        x, y = G.node[node]['pos']
+        node_trace['x'] += tuple([x])
+        node_trace['y'] += tuple([y])
+
+    for node, adjacencies in enumerate(G.adjacency()):
+        # node_trace['marker']['color'] += tuple([len(adjacencies[1])])
+        node_info = '# of connections: ' + str(len(adjacencies[1]))
+        # node_trace['text'] += tuple([node_info])
+
+    fig = go.Figure(data=[edge_trace, node_trace],
+                    layout=go.Layout(
+                        title='<br>Overview of subnets',
+                        titlefont=dict(size=16),
+                        showlegend=False,
+                        hovermode='closest',
+                        margin=dict(b=20, l=5, r=5, t=40),
+                        annotations=[dict(
+                            text="Python code: <a href='https://plot.ly/ipython-notebooks/network-graphs/'> https://plot.ly/ipython-notebooks/network-graphs/</a>",
+                            showarrow=False,
+                            xref="paper", yref="paper",
+                            x=0.005, y=-0.002)],
+                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
+
+    #Open the graph in a browser window
+    plotly.offline.plot(fig, auto_open=True)
+
 
 
 ######################
@@ -672,10 +839,9 @@ if conn == False:
     exit(-1)
 
 GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets)
-CreateMapPlot(DEBUG, subnets, gateways, routes, ipv4list, ipv6list)
+CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets)
+CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets)
 
-MapNetworkSC(DEBUG, username, password, host, port)
-MapNetworkIO(DEBUG, accesskey, secretkey, host, port)
 
 
 
