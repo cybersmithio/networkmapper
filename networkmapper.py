@@ -28,6 +28,7 @@ import plotly
 import plotly.graph_objs as go
 import networkx as nx
 
+
 def DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets):
     TIO=False
     if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
@@ -107,17 +108,22 @@ def MergeSubnets(orig,new):
 #Takes the gateways and merges them, ensuring no duplicates between the two
 #The orig should be a list of gateways (i.e. IPv4Address types with a /32)
 #the new should be an IPv4Address or IPv6Address type
-def MergeGateways(orig,new):
-
+def MergeGateways(DEBUG,orig,new):
     FOUND=False
+    if DEBUG:
+        print("Checking if gateway",new,"already exists in the gateway list:",orig,"\n\n\n")
     for i in orig:
         (index,gw)=i
         if gw == new:
             FOUND=True
+            if DEBUG:
+                print("The gateway already exists, so do not add to the list of gateways.")
 
     #If we didn't find a match, then add it to the orig
     if FOUND == False:
         orig.append(tuple([len(orig), new]))
+        if DEBUG:
+            print("The gateway does not exist, so adding to the list of gateways.")
 
     return(orig)
 
@@ -217,8 +223,7 @@ def ParsePlugin24272(DEBUG,text,subnets,gateways,routes):
                 subnets = MergeSubnets(subnets, n1)
             if not gw=="0.0.0.0":
                 #Only save the gateway and route if the gateway is not 0.0.0.0
-
-                gateways.append(tuple([len(gateways),ipaddress.IPv4Address(gw)]))
+                gateways = MergeGateways(DEBUG, gateways, ipaddress.IPv4Address(gw))
                 routes = MergeRoutes(routes, n1,ipaddress.IPv4Address(gw))
 
     if DEBUG:
@@ -277,7 +282,7 @@ def ParsePlugin10663(DEBUG,text,subnets,gateways,routes):
         if DEBUG:
             print("Router found:",i)
         gw=i
-        gateways = MergeGateways(gateways, ipaddress.IPv4Address(gw))
+        gateways = MergeGateways(DEBUG,gateways, ipaddress.IPv4Address(gw))
 
     netmask=""
     for i in re.findall("Netmask : ([0-9\.]+)",text,flags=re.IGNORECASE+re.MULTILINE):
@@ -404,155 +409,27 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
 
     return(tio)
 
-def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
-    connectorthickness = 0.5
-    connectorcolor = '#000'
-    nodesize = 10
-    xoffset = 0.05
-    subnetyoffset= -0.1
-    gatewayyoffset = -0.02
-    hostyoffset = -0.04
 
-    # build a graph
+#
+#This map draws an individual subnet, all aligned along 0 on the X-axis,
+# and each new subnet is an increment down the Y-axis.
+# From the subnet, draw a line out and then 90 degrees down.
+# From there, run a horizontal line across.  If there are any gateways,
+# put them here, incrementing the X position.
+# Also, if there are hosts, increment them along the X.
+#
+# The nodes are drawn separate from the connectors.
+#
+def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
+    # build a blank graph
     G = nx.Graph()
 
-    nodecount=0
-    y=0
-    subnettext=[]
-    nodecolor=[]
-    for (index,subnet) in subnets:
-        #New subnet, let's add a node.
-        G.add_node(nodecount,pos=(0,y))
-        if DEBUG:
-            print("New node",nodecount," is the subnet",subnet)
-        subnetnode=nodecount
-        subnettext+= tuple([subnet])
-        nodecolor += tuple(["grey"])
-        #In case there is no gateway, reconnect the hosts back to the subnet
-        gatewaynode=nodecount
-
-        #Done all the configuration needed for this node, so increment to the next
-        nodecount=nodecount+1
-
-        #If there are any gateways or hosts, move them along the X axis, starting from 0
-        x = 0
-
-        #See if there are any gateways on this subnet, and if so, add nodes at the same y position
-        for (gwindex,gw) in gateways:
-            if DEBUG:
-                print("Checking if "+str(gw)+"/32 is within",subnet)
-            if ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(str(gw)+"/32")):
-                x=x+xoffset
-                if DEBUG:
-                    print("The gateway",gw,"belongs to this subnet",subnet)
-                G.add_node(nodecount,pos=(x,y+gatewayyoffset))
-                subnettext += tuple([gw])
-                nodecolor += tuple(["red"])
-                if DEBUG:
-                    print("New node", nodecount, " is the gateway", gw)
-                if DEBUG:
-                    print("Connecting nodes "+str(subnetnode)+" and "+str(nodecount))
-                G.add_edge(subnetnode,nodecount)
-                gatewaynode=nodecount
-                # Done all the configuration needed for this node, so increment to the next
-                nodecount = nodecount + 1
-
-        #See if there are any hosts on this subnet, and if so, add nodes at the same y position.
-        #TODO: make this work with IPv6
-        for (ipindex,ip) in ipaddresses:
-            if DEBUG:
-                print("Checking if "+str(ip)+" is within",subnet)
-            if isinstance(ip, ipaddress.IPv4Address):
-                if ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(str(ip)+"/32")):
-                    x=x+xoffset
-                    if DEBUG:
-                        print("The host",ip,"belongs to this subnet",subnet)
-                    #First add an anchor node that will be used to connect back to the gateway on the horizontal
-                    G.add_node(nodecount,pos=(x,y+gatewayyoffset))
-                    subnettext += tuple([""])
-                    nodecolor += tuple(["white"])
-                    G.add_edge(gatewaynode,nodecount)
-                    nodecount = nodecount + 1
-
-                    #Now add the actual host
-                    if DEBUG:
-                        print("New node", nodecount, " is the host", ip)
-                    G.add_node(nodecount,pos=(x,y+hostyoffset))
-                    subnettext += tuple([""])
-                    nodecolor += tuple(["blue"])
-
-                    if DEBUG:
-                        print("Connecting nodes "+str(gatewaynode)+" and "+str(nodecount)+" with a right angle")
-                    G.add_edge(nodecount-1,nodecount)
-                    # Done all the configuration needed for this node, so increment to the next
-                    nodecount = nodecount + 1
-            elif isinstance(ip, ipaddress.IPv6Address):
-                if ipaddress.ip_network(subnet).overlaps(ipaddress.ip_network(str(ip) + "/128")):
-                    x = x + xoffset
-                    if DEBUG:
-                        print("The host", ip, "belongs to this subnet", subnet)
-                    # First add an anchor node that will be used to connect back to the gateway on the horizontal
-                    G.add_node(nodecount, pos=(x, y + gatewayyoffset))
-                    subnettext += tuple([""])
-                    nodecolor += tuple(["white"])
-                    G.add_edge(gatewaynode, nodecount)
-                    nodecount = nodecount + 1
-
-                    # Now add the actual host
-                    if DEBUG:
-                        print("New node", nodecount, " is the host", ip)
-                    G.add_node(nodecount, pos=(x, y + hostyoffset))
-                    subnettext += tuple([""])
-                    nodecolor += tuple(["blue"])
-
-                    if DEBUG:
-                        print("Connecting nodes " + str(gatewaynode) + " and " + str(nodecount) + " with a right angle")
-                    G.add_edge(nodecount - 1, nodecount)
-                    # Done all the configuration needed for this node, so increment to the next
-                    nodecount = nodecount + 1
-            else:
-                print("No idea what this address is:",ip)
-
-
-        y=y+subnetyoffset
-
-
-    pos = nx.get_node_attributes(G, 'pos')
-
-    dmin = 1
-    ncenter = 0
-    for n in pos:
-        x, y = pos[n]
-        d = (x - 0.5) ** 2 + (y - 0.5) ** 2
-        if d < dmin:
-            ncenter = n
-            dmin = d
-
-    p = nx.single_source_shortest_path_length(G, ncenter)
-
-    edge_trace = go.Scatter(
+    subnet_trace = go.Scatter(
         x=[],
         y=[],
-        line=dict(width=connectorthickness, color=connectorcolor),
-        hoverinfo='none',
-        mode='lines')
-
-    for edge in G.edges():
-        x0, y0 = G.node[edge[0]]['pos']
-        x1, y1 = G.node[edge[1]]['pos']
-        # print("x0=",x0)
-        # print("y0=",y0)
-        # print("x1=",x1)
-        # print("y1=",y1)
-        edge_trace['x'] += tuple([x0, x1, None])
-        edge_trace['y'] += tuple([y0, y1, None])
-
-    node_trace = go.Scatter(
-        x=[],
-        y=[],
-        text=subnettext,
+        text=[],
         textposition='bottom center',
-        hovertext=subnettext,
+        hovertext=[],
         mode='markers+text',
         hoverinfo='text',
         marker=dict(
@@ -563,9 +440,9 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
             # 'Hot' | 'Blackbody' | 'Earth' | 'Electric' | 'Viridis' |
             colorscale='YlGnBu',
             reversescale=True,
-            color=nodecolor,
+            color=[],
 
-            size=nodesize,
+            size=[],
             colorbar=dict(
                 thickness=15,
                 title='Node Connections',
@@ -574,32 +451,205 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
             ),
             line=dict(width=2)))
 
-    for node in G.nodes():
-        x, y = G.node[node]['pos']
-        node_trace['x'] += tuple([x])
-        node_trace['y'] += tuple([y])
+    shape_layout=PlotShapeCircle(DEBUG)
+    fig = go.Figure(data=[subnet_trace],
+                    layout=[shape_layout])
 
-    for node, adjacencies in enumerate(G.adjacency()):
-        # node_trace['marker']['color'] += tuple([len(adjacencies[1])])
-        node_info = '# of connections: ' + str(len(adjacencies[1]))
-        # node_trace['text'] += tuple([node_info])
-
-    fig = go.Figure(data=[edge_trace, node_trace],
-                    layout=go.Layout(
-                        title='<br>Network graph made with Python',
-                        titlefont=dict(size=16),
-                        showlegend=False,
-                        hovermode='closest',
-                        margin=dict(b=20, l=5, r=5, t=40),
-                        annotations=[dict(
-                            text="Python code: <a href='https://plot.ly/ipython-notebooks/network-graphs/'> https://plot.ly/ipython-notebooks/network-graphs/</a>",
-                            showarrow=False,
-                            xref="paper", yref="paper",
-                            x=0.005, y=-0.002)],
-                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
-
+    #Open the graph in a browser window
     plotly.offline.plot(fig, auto_open=True)
+
+def CreateTestPattern(DEBUG):
+    # build a blank graph
+    G = nx.Graph()
+
+    subnet_trace = go.Scatter(
+        x=[],
+        y=[],
+        text=[],
+        textposition='bottom center',
+        hovertext=[],
+        mode='markers+text',
+        hoverinfo='text',
+        marker=dict(
+            showscale=True,
+            # colorscale options
+            # 'Greys' | 'YlGnBu' | 'Greens' | 'YlOrRd' | 'Bluered' | 'RdBu' |
+            # 'Reds' | 'Blues' | 'Picnic' | 'Rainbow' | 'Portland' | 'Jet' |
+            # 'Hot' | 'Blackbody' | 'Earth' | 'Electric' | 'Viridis' |
+            colorscale='YlGnBu',
+            reversescale=True,
+            color=[],
+
+            size=[],
+            colorbar=dict(
+                thickness=15,
+                title='Node Connections',
+                xanchor='left',
+                titleside='right'
+            ),
+            line=dict(width=2)))
+
+
+
+
+
+    layout = {
+        'xaxis': {
+            'range': [0, 4.5],
+            'zeroline': False,
+        },
+        'yaxis': {
+            'range': [0, 4.5]
+        },
+        'width': 800,
+        'height': 800,
+        'shapes': []
+    }
+    data=[]
+    (text,shapeinfo)=PlotGatewayShape(DEBUG, 1, 1, "xxx.xxx.xxx.xxx")
+    for i in shapeinfo:
+        layout['shapes'].append(i)
+    for i in text:
+        data.append(i)
+
+    (text,shapeinfo)=PlotSubnetShape(DEBUG,2,2,"xxx.xxx.xxx.xxx/xx")
+    for i in shapeinfo:
+        layout['shapes'].append(i)
+    for i in text:
+        data.append(i)
+
+
+    fig = go.Figure(data=data,
+                    layout=layout)
+
+    #Open the graph in a browser window
+    plotly.offline.plot(fig, auto_open=True)
+
+
+
+
+def PlotShapeCircle(DEBUG):
+    layout = {
+        'xaxis': {
+            'range': [0, 4.5],
+            'zeroline': False,
+        },
+        'yaxis': {
+            'range': [0, 4.5]
+        },
+        'width': 800,
+        'height': 800,
+        'shapes': [
+            # unfilled circle
+            {
+                'type': 'circle',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': 1.0,
+                'y0': 1.0,
+                'x1': 1.1,
+                'y1': 1.1,
+                'line': {
+                    'color': 'rgba(50, 171, 96, 1)',
+                },
+            },
+        ]
+    }
+    return(layout)
+
+
+
+#The bottom left corner of the subnet will be at the x and y coordinates supplied
+def PlotGatewayShape(DEBUG,x,y,text):
+    size=0.5
+
+    trace0 = go.Scatter(
+        x=[x+(size/2)],
+        y=[y+(size/2)],
+        text=[text],
+        textfont=dict([('size',8)]),
+        mode='text',
+        textposition='middle center'
+    )
+
+    shape = [
+        {
+                'type': 'circle',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x,
+                'y0': y,
+                'x1': x+size,
+                'y1': y+size,
+                'line': {
+                    'color': 'rgba(50, 171, 96, .6)',
+                },
+                'fillcolor': 'rgba(50, 171, 96, .6)',
+      }
+    ]
+    data=[trace0]
+    return(data,shape)
+
+#The bottom left corner of the subnet will be at the x and y coordinates supplied
+def PlotSubnetShape(DEBUG,x,y,text):
+    length=1.0
+
+    trace0 = go.Scatter(
+        x=[x+0.15],
+        y=[y],
+        text=[text],
+        mode='text',
+        textposition='top right'
+    )
+
+    shape =  [
+            #rectangle
+            {
+                'type': 'rect',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x+0.05,
+                'y0': y,
+                'x1': x+0.1+length,
+                'y1': y+0.1,
+                'line': {
+                    'color': 'rgba(50, 171, 96, .6)',
+                    'width': 3,
+                },
+                'fillcolor': 'rgba(50, 171, 96, .6)',
+            },
+            # start (left) unfilled circle
+            {
+                'type': 'circle',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x,
+                'y0': y,
+                'x1': x+0.1,
+                'y1': y+0.1,
+                'line': {
+                    'color': 'rgba(50, 171, 96, .6)',
+                },
+                'fillcolor': 'white',
+            },
+            # end curve, made by a  circle
+            {
+                'type': 'circle',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x+0.05+length,
+                'y0': y,
+                'x1': x+0.15+length,
+                'y1': y+0.1,
+                'line': {
+                    'color': 'rgba(50, 171, 96, .6)',
+                },
+                'fillcolor': 'rgba(50, 171, 96, .6)',
+            },
+    ]
+    data=[trace0]
+    return(data,shape)
+
 
 def CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets):
     connectorthickness = 0.5
@@ -730,6 +780,8 @@ def CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets):
 ###
 ######################
 
+
+
 # Get the arguments from the command line
 parser = argparse.ArgumentParser(description="Pulls information from Tenable.io or Tenable.sc to create a network map. (Currently just text)")
 parser.add_argument('--accesskey',help="The Tenable.io access key",nargs=1,action="store")
@@ -739,6 +791,7 @@ parser.add_argument('--password',help="The SecurityCenter password",nargs=1,acti
 parser.add_argument('--host',help="The Tenable.io host. (Default is cloud.tenable.com)",nargs=1,action="store")
 parser.add_argument('--port',help="The Tenable.io port. (Default is 443)",nargs=1,action="store")
 parser.add_argument('--debug',help="Turn on debugging",action="store_true")
+parser.add_argument('--testpattern',help="Draw a test pattern",action="store_true")
 
 args=parser.parse_args()
 
@@ -748,6 +801,9 @@ if args.debug:
     DEBUG=True
     print("Debugging is enabled.")
 
+if args.testpattern:
+    CreateTestPattern(DEBUG)
+    exit(0)
 
 # Pull as much information from the environment variables
 # as possible, and where missing then initialize the variables.
@@ -838,10 +894,13 @@ if conn == False:
     print("There was a problem connecting.")
     exit(-1)
 
+
+
 GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets)
 CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets)
-CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets)
 
+CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets)
+exit(0)
 
 
 
