@@ -105,6 +105,25 @@ def MergeSubnets(orig,new):
 
     return(orig)
 
+
+
+#Takes the scanner and merges it to the existing scanner list, ensuring no duplicates between the two
+#The orig should be a list of scanners (i.e. IPv4Addres types)
+#the new should be an IPv4Address or IPv6Address type
+def MergeScanners(orig,new):
+
+    FOUND=False
+    for i in orig:
+        (index,scanner)=i
+        if scanner == new:
+            FOUND=True
+
+    #If we didn't find a match, then add it to the orig
+    if FOUND == False:
+        orig.append(tuple([len(orig), new]))
+
+    return(orig)
+
 #Takes the gateways and merges them, ensuring no duplicates between the two
 #The orig should be a list of gateways (i.e. IPv4Address types with a /32)
 #the new should be an IPv4Address or IPv6Address type
@@ -307,7 +326,7 @@ def ParsePlugin10663(DEBUG,text,subnets,gateways,routes):
 
 
 #Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10287
-def GetPlugin10287(DEBUG,conn,subnets,gateways,routes):
+def GetPlugin10287(DEBUG,conn,subnets,gateways,routes,scanners):
     if DEBUG:
         print("Parsing information from all plugin ID 10287")
 
@@ -329,9 +348,9 @@ def GetPlugin10287(DEBUG,conn,subnets,gateways,routes):
         if DEBUG:
             print("Result info:",i)
         if TIO:
-            (subnets, gateways, routes) = ParsePlugin10287(DEBUG, i['plugin_output'], subnets, gateways, routes)
+            (subnets, gateways, routes,scanners) = ParsePlugin10287(DEBUG, i['plugin_output'], subnets, gateways, routes,scanners)
         else:
-            (subnets,gateways,routes)=ParsePlugin10287(DEBUG,i['pluginText'],subnets,gateways,routes)
+            (subnets,gateways,routes,scanners)=ParsePlugin10287(DEBUG,i['pluginText'],subnets,gateways,routes,scanners)
 
     if DEBUG:
         print("Summary of information collected from all instances of Plugin 10287")
@@ -339,23 +358,54 @@ def GetPlugin10287(DEBUG,conn,subnets,gateways,routes):
         print("Gateways:",gateways)
         print("Routes:",routes)
 
-    return(subnets,gateways,routes)
+    return(subnets,gateways,routes,scanners)
 
 
 #Takes the text which should be from a Plugin Output for Plugin ID 10287, and parses it.
 #Merges the data with the existing subnets, gateways, and routes lists, and then returns those.
-def ParsePlugin10287(DEBUG,text,subnets,gateways,routes):
+def ParsePlugin10287(DEBUG,text,subnets,gateways,routes,scanners):
+    #First, split the plugin output.
+    #Assumptions:
+    # First line will always be "For your information, here is the traceroute from"...
+    #The last 4 lines will be the endhost blank line, the "Hop Count Line", and another blank line
+    # The remaining lines will be IP addresses or possibly symbols like (?) until the "Hop Count line"
+    # The first IP address will always be the scanner.
     if DEBUG:
         print("Parsing plugin text from 10287",text)
 
+    for (scanner,endhost) in re.findall("For your information, here is the traceroute from (.*) to (.*) :",text,flags=re.IGNORECASE):
+        if DEBUG:
+            print("The scanner IP address is: \"" + str(scanner) + "\"")
+        scanners = MergeScanners(scanners, ipaddress.IPv4Address(scanner))
+
+    FIRSTIP=True
+    lines=re.split("\n",text)
+    lastaddress=len(lines)-4
+    if DEBUG:
+        print("Total lines found:",len(lines))
+    for i in range(0,len(lines)):
+        if i > 1 and i < lastaddress:
+            if DEBUG:
+                print("The next hop is : \""+str(lines[i])+"\"")
+            try:
+                gateways = MergeGateways(DEBUG, gateways, ipaddress.IPv4Address(lines[i]))
+            except:
+                if DEBUG:
+                    print("Not a valid next hop: \"" + str(lines[i]) + "\"")
+
+    if DEBUG:
+        print("Summary of information collected")
+        print("Subnets:",subnets)
+        print("Gateways:",gateways)
+        print("Routes:",routes)
+        print("\n\n\n")
+
+    return(subnets,gateways,routes,scanners)
 
 
-    return(subnets,gateways,routes)
 
 
-
-
-def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets):
+def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners):
     (ipaddresses, assets)=DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets)
 
     #Gather interface enumeration
@@ -364,8 +414,28 @@ def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets):
     #Gather info from DHCP
     (subnets, gateways, routes)=GetPlugin10663(DEBUG,conn,subnets,gateways,routes)
 
-    #Gather traceroute info
-    (subnets, gateways, routes)=GetPlugin10287(DEBUG,conn,subnets,gateways,routes)
+    #Gather traceroute info.
+    # This should also provide the information on a Nessus scanner itself, since the first IP will be the scanner.
+    (subnets, gateways, routes, scanners)=GetPlugin10287(DEBUG,conn,subnets,gateways,routes,scanners)
+
+    # 10551 gives some clues to interfaces via SNMP.  This could potentially be used to make a routing map
+
+    #92370 shows ARP tables, so important for matching MAC addresses to IP addresses.
+
+
+    #Plugin ID 132 can sometimes provide information about other IP or MAC addresses on the system.
+    # (i.e. 192.168.15.1 belongs to 192.168.16.1 because this plugin says so, and the hostname is the same)
+
+
+    #Plugin ID 19 can show that there are multiple VLANs on a host, potentially indicating a gateway
+
+    #56310 can show some network information from the iptables, but this may not indicate actual network subnets.
+    #It may be more zones.
+
+
+    #35716 gives important information on MAC address matches for assets.
+
+    #TODO: Need a function that takes data such as traceroute info, and pieces together what gateways might be connected.
 
 
     if DEBUG:
@@ -374,6 +444,7 @@ def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets):
         print("Returned assets:", ipaddresses)
         print("Subnets:",subnets)
         print("Gateways:",gateways)
+        print("Scanners:",scanners)
         print("Routes:",routes)
 
 
@@ -424,39 +495,87 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
     # build a blank graph
     G = nx.Graph()
 
-    subnet_trace = go.Scatter(
-        x=[],
-        y=[],
-        text=[],
-        textposition='bottom center',
-        hovertext=[],
-        mode='markers+text',
-        hoverinfo='text',
-        marker=dict(
-            showscale=True,
-            # colorscale options
-            # 'Greys' | 'YlGnBu' | 'Greens' | 'YlOrRd' | 'Bluered' | 'RdBu' |
-            # 'Reds' | 'Blues' | 'Picnic' | 'Rainbow' | 'Portland' | 'Jet' |
-            # 'Hot' | 'Blackbody' | 'Earth' | 'Electric' | 'Viridis' |
-            colorscale='YlGnBu',
-            reversescale=True,
-            color=[],
+    y=1
+    x=0.1
+    subnetyoffset=1
 
-            size=[],
-            colorbar=dict(
-                thickness=15,
-                title='Node Connections',
-                xanchor='left',
-                titleside='right'
-            ),
-            line=dict(width=2)))
+    data = []
+    layout = {
+        'xaxis': {
+            'range': [0, 20],
+            'visible': False,
+            'showline': False,
+            'zeroline': True,
+        },
+        'showlegend': False,
+        'yaxis': {
+            'range': [0, 20],
+            'visible': False,
+            'showline': False,
+            'zeroline': True,
+        },
+        'width': 3200,
+        'height': 3200,
+        'shapes': []
+    }
 
-    shape_layout=PlotShapeCircle(DEBUG)
-    fig = go.Figure(data=[subnet_trace],
-                    layout=[shape_layout])
+    #Go through all the subnets and put a node on the graph
+    for (index,subnet) in subnets:
+        (text, shapeinfo) = PlotSubnetShape(DEBUG, x+0.7, y+0.25, str(subnet))
+        for i in shapeinfo:
+            layout['shapes'].append(i)
+        for i in text:
+            data.append(i)
 
-    #Open the graph in a browser window
+        #Try to attach a gateway to each subnet, so check all the gateways
+        gwtext=[]
+        for(index,gw) in gateways:
+            #See if this gateway is in the current subnet, and if so, print the name
+            if subnet.overlaps(ipaddress.ip_network(str(gw)+"/32")):
+                gwtext.append(str(gw))
+        (text, shapeinfo) = PlotGatewayShape(DEBUG, x, y, gwtext)
+        for i in shapeinfo:
+            layout['shapes'].append(i)
+        for i in text:
+            data.append(i)
+        (shapeinfo)=DrawStraightConnector(DEBUG, x+0.7, y+0.3, x+0.5, y+0.3)
+        for i in shapeinfo:
+            layout['shapes'].append(i)
+
+        #Try to attach any scanners to the subnet, so check all the scanners
+        scannercount=0
+        for(index,ns) in scanners:
+            #See if this gateway is in the current subnet, and if so, print the name
+            if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
+                gwtext.append(str(ns))
+                (text, shapeinfo) = PlotNessusScanner(DEBUG, x+2+(scannercount*0.7), y-0.3, ns)
+                for i in shapeinfo:
+                    layout['shapes'].append(i)
+                for i in text:
+                    data.append(i)
+                #Draw a connector from the scanner to the subnet
+                (shapeinfo) = DrawElbowConnector(DEBUG, x+1, y+0.25, x+1, y+0.15, x+2.2+(scannercount*0.7), y+0.15,x+2.2+(scannercount*0.7) , y+0.1)
+                for i in shapeinfo:
+                    layout['shapes'].append(i)
+
+                scannercount+=1
+
+        y=y+subnetyoffset
+
+    #Scaling does not work well with the font sizes, so removing this for now
+    #layout['yaxis']['range']=[0,y+3]
+    #layout['xaxis']['range']=[0,y+3]
+    #layout['height']=y*100
+    #layout['width']=y*100
+
+
+
+    fig = go.Figure(data=data,
+                    layout=layout)
+
+    # Open the graph in a browser window
     plotly.offline.plot(fig, auto_open=True)
+
 
 def CreateTestPattern(DEBUG):
     # build a blank graph
@@ -469,7 +588,7 @@ def CreateTestPattern(DEBUG):
         textposition='bottom center',
         hovertext=[],
         mode='markers+text',
-        hoverinfo='text',
+        hoverinfo='none',
         marker=dict(
             showscale=True,
             # colorscale options
@@ -490,23 +609,26 @@ def CreateTestPattern(DEBUG):
             line=dict(width=2)))
 
 
-
-
-
     layout = {
         'xaxis': {
             'range': [0, 4.5],
-            'zeroline': False,
+            'visible': False,
+            'showline': False,
+            'zeroline': True,
         },
+        'showlegend': False,
         'yaxis': {
-            'range': [0, 4.5]
+            'range': [0, 4.5],
+            'visible': False,
+            'showline': False,
+            'zeroline': True,
         },
         'width': 800,
         'height': 800,
         'shapes': []
     }
     data=[]
-    (text,shapeinfo)=PlotGatewayShape(DEBUG, 1, 1, "xxx.xxx.xxx.xxx")
+    (text,shapeinfo)=PlotGatewayShape(DEBUG, 1, 1, ["xxx.xxx.xxx.1","xxx.xxx.xxx.2","xxx.xxx.xxx.xxx"])
     for i in shapeinfo:
         layout['shapes'].append(i)
     for i in text:
@@ -517,6 +639,17 @@ def CreateTestPattern(DEBUG):
         layout['shapes'].append(i)
     for i in text:
         data.append(i)
+
+
+    (text,shapeinfo)=PlotNessusScanner(DEBUG,3,3,"xxx.xxx.xxx.xxx")
+    for i in shapeinfo:
+        layout['shapes'].append(i)
+    for i in text:
+        data.append(i)
+
+    (shapeinfo)=DrawElbowConnector(DEBUG, 1, 3, 1, 3.2, 2, 3.2, 2, 3.5)
+    for i in shapeinfo:
+        layout['shapes'].append(i)
 
 
     fig = go.Figure(data=data,
@@ -552,25 +685,153 @@ def PlotShapeCircle(DEBUG):
                 'line': {
                     'color': 'rgba(50, 171, 96, 1)',
                 },
+                'hoverinfo': 'none',
             },
         ]
     }
     return(layout)
 
 
+def DrawStraightConnector(DEBUG,x0,y0,x1,y1):
+    shape = [
+        {
+                'type': 'line',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x0,
+                'y0': y0,
+                'x1': x1,
+                'y1': y1,
+                'line': {
+                    'color': 'black',
+                    'width': 2,
+                },
+        },
+
+    ]
+    return(shape)
+
+
+def DrawElbowConnector(DEBUG,x0,y0,x1,y1,x2,y2,x3,y3):
+    shape = [
+        {
+                'type': 'line',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x0,
+                'y0': y0,
+                'x1': x1,
+                'y1': y1,
+                'line': {
+                    'color': 'black',
+                    'width': 2,
+                },
+        },
+        {
+            'type': 'line',
+            'xref': 'x',
+            'yref': 'y',
+            'x0': x1,
+            'y0': y1,
+            'x1': x2,
+            'y1': y2,
+            'line': {
+                'color': 'black',
+                'width': 2,
+            },
+        },
+        {
+            'type': 'line',
+            'xref': 'x',
+            'yref': 'y',
+            'x0': x2,
+            'y0': y2,
+            'x1': x3,
+            'y1': y3,
+            'line': {
+                'color': 'black',
+                'width': 2,
+            },
+        },
+
+    ]
+    return(shape)
 
 #The bottom left corner of the subnet will be at the x and y coordinates supplied
-def PlotGatewayShape(DEBUG,x,y,text):
+def PlotGatewayShape(DEBUG,x,y,textlist):
     size=0.5
 
-    trace0 = go.Scatter(
+    data=[]
+
+    listsize=len(textlist)
+    textinc=(size/(listsize+1))
+    textx=x+(size/2)
+    texty=y+textinc
+
+    #TODO: Test with multiple gateways
+    for text in textlist:
+        print("x",x)
+        print("y", y)
+        trace=go.Scatter(
+            x=[textx],
+            y=[texty],
+            text=[str(text)],
+            textfont=dict([('size',8)]),
+            mode='text',
+            textposition='middle center',
+            hoverinfo='none',
+        )
+        data.append(trace)
+        texty=texty+textinc
+
+
+    shape = [
+        {
+            'type': 'circle',
+            'xref': 'x',
+            'yref': 'y',
+            'x0': x,
+            'y0': y,
+            'x1': x+size,
+            'y1': y+size,
+            'line': {
+                'color': 'rgba(50, 171, 96, .6)',
+            },
+            'fillcolor': 'rgba(50, 171, 96, .6)',
+        }
+    ]
+    return(data,shape)
+
+
+#The bottom left corner of the subnet will be at the x and y coordinates supplied
+def PlotNessusScanner(DEBUG,x,y,text):
+    size=0.4
+
+    data=[]
+
+    trace = go.Scatter(
         x=[x+(size/2)],
         y=[y+(size/2)],
-        text=[text],
-        textfont=dict([('size',8)]),
+        text=["N"],
+        textfont=dict([('size', 32)]),
         mode='text',
-        textposition='middle center'
+        textposition='middle center',
+        hoverinfo='none',
     )
+    data.append(trace)
+
+    trace = go.Scatter(
+        x=[x+(size/2)],
+        y=[y+0.1],
+        text=[text],
+        textfont=dict([('size', 6)]),
+        mode='text',
+        textposition='bottom center',
+        hoverinfo='none',
+
+    )
+    data.append(trace)
+
 
     shape = [
         {
@@ -587,7 +848,6 @@ def PlotGatewayShape(DEBUG,x,y,text):
                 'fillcolor': 'rgba(50, 171, 96, .6)',
       }
     ]
-    data=[trace0]
     return(data,shape)
 
 #The bottom left corner of the subnet will be at the x and y coordinates supplied
@@ -597,9 +857,10 @@ def PlotSubnetShape(DEBUG,x,y,text):
     trace0 = go.Scatter(
         x=[x+0.15],
         y=[y],
-        text=[text],
+        text=[str(text)],
         mode='text',
-        textposition='top right'
+        textposition='top right',
+        hoverinfo = 'none',
     )
 
     shape =  [
@@ -871,7 +1132,8 @@ ipaddresses=[]
 #A list of assets found.  Each element is a tuple with an index, an asset ID, and a list of  IPv4Address and IPv6Address objects.
 assets=[]
 
-
+#A list of scanners found. Each element is a tuple with an index and the IPv4Address or IPv6Address object representing the IP address.
+scanners=[]
 
 if accesskey != "" and secretkey != "":
     print("Connecting to cloud.tenable.com with access key", accesskey, "to report on assets")
@@ -896,7 +1158,7 @@ if conn == False:
 
 
 
-GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets)
+GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners)
 CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets)
 
 CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets)
