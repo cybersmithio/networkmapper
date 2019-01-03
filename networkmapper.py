@@ -1,15 +1,31 @@
 #!/usr/bin/python
 #
-# Takes a Tenable.io asset data and generates a CSV report.
-# The output file is called tio-asset-download.csv
+# Takes data from Tenable.io or Tenable.sc and makes a network map.
+# Written by: James Smith
+#
+# Version 1.1 - Has functionality to identify when gateways/subnets sharerouters. Jan 3, 2018
+# Version 1.0 - Initial version to gather information and make a basic plot.  Dec 31, 2018
+#
+# Future capabilities:
+#   Host count in subnet label
+#   Show router interconnections (if they exist)
 #
 # Example usage with environment variables:
-# TIOACCESSKEY="********************"; export TIOACCESSKEY
-# TIOSECRETKEY="********************"; export TIOSECRETKEY
-# ./tio-asset-download.py
+# TIO_ACCESS_KEY=""; export TIO_ACCESS_KEY
+# TIO_SECRET_KEY=""; export TIO_SECRET_KEY
+# python3 networkmapper.py
 #
-# This script requires the Tenable.io Python SDK to be installed.
-# If this is not already done, then run pip install tenable_io
+# This script requires these libraries to be installed:
+#     pyTenable
+#     plotly
+#     networkx
+# If this is not already done, then run pip install pytenable plotly networkx
+#
+# Assumptions and notes:
+#  * When drawing the map, if there are subnets that are just one hop away then the assumption is
+#    those subnets are connected to the same gateway.
+#  * For best results, always have a scanner in each subnet, and have at least a host discovery scan
+#    that scans from a Nessus scanner on one subnet to another subnet.  This will build the router map.
 #
 
 import json
@@ -145,6 +161,75 @@ def MergeGateways(DEBUG,orig,new):
             print("The gateway does not exist, so adding to the list of gateways.")
 
     return(orig)
+
+
+#Takes two gw/subnet tuples (entry1 and entry2), and merges it into the router list
+#If another duplicate exists, then merge the data together.
+def MergeRouters(DEBUG,routers,entry1, entry2):
+    FOUND=False
+    if DEBUG:
+        print("Checking for other router entries that have either of these subnets",entry1, entry2)
+
+    # routers is a list of routing devices.  Each element is a tuple with an index, a list of gateways (IPv4Address and IPv6Address objects),
+    #  and a list of subnets.  (IPv4Networks and IPv6Networks objects).
+
+    (gw1,subnet1)=entry1
+    (gw2,subnet2)=entry2
+
+    #Special case, if this is the first entry into the routers, just add it.
+    if len(routers) == 0:
+        routers.append(tuple([0,[gw1,gw2],[subnet1,subnet2]]))
+        if DEBUG:
+            print("MergeRouters: No existing entries, so adding", entry1, entry2)
+    else:
+        MERGE = False
+        for i in routers:
+            (index,gateways,subnets)=i
+            #Does one of the new gateways already exist in this entry?
+            for j in gateways:
+                if j == gw1 or j == gw2:
+                    if DEBUG:
+                        print("Found a matching router entry by the gateway",gw1,gw2)
+                    #Merge the new entries into this entry
+                    MERGE=True
+            #If an entry has not been found yet, keep searching by looking through the subnets
+            if MERGE == False:
+                for j in subnets:
+                    if j == subnet1 or j == subnet2:
+                        if DEBUG:
+                            print("Found a matching router entry by the subnet",subnet1,subnet2)
+                        #Merge the new entries into this entry
+                        MERGE=True
+            if MERGE == True:
+                #This entry matches the new gateways and subnets, so let's merge everything together
+                try:
+                    x=gateways.index(gw1)
+                except:
+                    gateways.append(gw1)
+                try:
+                    x=gateways.index(gw2)
+                except:
+                    gateways.append(gw2)
+                try:
+                    x=subnets.index(subnet1)
+                except:
+                    subnets.append(subnet1)
+                try:
+                    x=subnets.index(subnet2)
+                except:
+                    subnets.append(subnet2)
+
+                routers[index]=tuple([index,gateways,subnets])
+                if DEBUG:
+                    print("MergeRouters: Merging new router entry:",routers[index])
+                break
+        if MERGE == False:
+            #Just add a new entry
+            routers.append(tuple([len(routers), [gw1, gw2], [subnet1, subnet2]]))
+            if DEBUG:
+                print("MergeRouters: No existing entry for",entry1, entry2, "so adding")
+
+    return(routers)
 
 #Takes the routes and merges them, ensuring no duplicates between the two
 #The orig should be a list of routes (i.e. A tuple of an IPv4Network and an IPv4Address)
@@ -393,6 +478,7 @@ def ParsePlugin10287(DEBUG,text,subnets,gateways,routes,scanners):
                 if DEBUG:
                     print("Not a valid next hop: \"" + str(lines[i]) + "\"")
 
+
     if DEBUG:
         print("Summary of information collected")
         print("Subnets:",subnets)
@@ -401,6 +487,170 @@ def ParsePlugin10287(DEBUG,text,subnets,gateways,routes,scanners):
         print("\n\n\n")
 
     return(subnets,gateways,routes,scanners)
+
+
+def AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners,routers):
+    if DEBUG:
+        print("Reviewing plugin ID 10287 along with subnets and gateways to determine routers")
+
+
+
+    gwsubnetlist=[]
+    #First go through all the gateways and match them with their associated subnets
+    # A list of gateways found.  Each element is a tuple with the an index and the IPv4Address or IPv6Address object representing the gateway.
+    for i in gateways:
+        (gwi,gwaddr)=i
+        # A list of subnets found.  Each element is a tuple with the an index and the IPv4Network or IPv6Network object representing the subnet.
+        SNFOUND=False
+        for j in subnets:
+            (subneti,subnet)=j
+
+            if subnet.overlaps(ipaddress.ip_network(str(gwaddr) + "/32")):
+                gwsubnetlist.append(tuple([gwaddr,subnet]))
+                SNFOUND=True
+        if SNFOUND==False:
+            if DEBUG:
+                print("There was no subnet found for the gateway",gwaddr)
+            gwsubnetlist.append(tuple([gwaddr, None]))
+
+    #Now go through all the subnets and to catch all the subnets that might not have gateways discovered.
+    for i in subnets:
+        (subneti, subnet) = i
+        GWFOUND=False
+        for j in gateways:
+            (gwi, gwaddr) = j
+            if subnet.overlaps(ipaddress.ip_network(str(gwaddr) + "/32")):
+                GWFOUND=True
+        if GWFOUND == False:
+            if DEBUG:
+                print("There was no gateway found for the subnet",subnet)
+            gwsubnetlist.append(tuple([None,subnet]))
+
+    if DEBUG:
+        print("List of gateways and their subnets:",gwsubnetlist)
+        print("Next, analyze which subnets share a gateway")
+
+
+
+    #Assume we're using a SecurityCenter connection unless we know the connection is for Tenable.io
+    TIO=False
+    if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
+        TIO=True
+
+    try:
+        if TIO:
+            results=conn.workbenches.vuln_outputs(10287)
+        else:
+            results = conn.analysis.vulns(('pluginID', '=', '10287'), tool="vulndetails")
+    except:
+        results=[]
+        print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
+
+    #Parse all the traceroute results and use that to start matching up subnets.
+    # This may not match everything, so afterwards all the subnets and gateways must be re-examined and compared to the routers.
+    for i in results:
+        if DEBUG:
+            print("Result info:",i)
+        if TIO:
+            routers = ParsePlugin10287ForRouters(DEBUG, i['plugin_output'], gwsubnetlist,routers)
+        else:
+            routers=ParsePlugin10287ForRouters(DEBUG,i['pluginText'],gwsubnetlist,routers)
+
+    if DEBUG:
+        print("Here are the routers:",routers)
+
+
+    #Now lets add any subnets or gateways that do not share any routers.
+    for (gw,subnet) in gwsubnetlist:
+        SUBNETFOUND=False
+        if subnet != None:
+            if DEBUG:
+                print("Checking if subnet",subnet,"already has an entry on a router")
+            for (ri,gwlist,snlist) in routers:
+                if DEBUG:
+                    print("Checking for subnet",subnet,"in subnet list",snlist)
+                try:
+                    x=snlist.index(subnet)
+                    SUBNETFOUND = True
+                except:
+                    x=None
+            if SUBNETFOUND == False:
+                if DEBUG:
+                    print("This subnet was not found on any existing router entry, so adding an entry for",gw,subnet)
+                routers.append(tuple([len(routers),[gw],[subnet]]))
+            else:
+                if DEBUG:
+                    print("This subnet already exists in a router entry, so not adding")
+
+    return(routers)
+
+# Assume that if a subnet is "Hop Count: 2" then the subnet of the scanner and the subnet of the host is separated
+# by only one router, so that router can be identified.
+# TODO: This should not just be about matching subnets, but also adding in single entries for gateways and subnets that might not be directly connected
+def ParsePlugin10287ForRouters(DEBUG,text,gwsubnetlist,routers):
+    if DEBUG:
+        print("Determining which subnets share routers from Plugin 10287 output:", text)
+
+    for (scanner, endhost) in re.findall("For your information, here is the traceroute from (.*) to (.*) :", text, flags=re.IGNORECASE):
+        if DEBUG:
+            print("The scanner IP address is: \"" + str(scanner) + "\"")
+
+    # Break up the plugin into individual lines
+    lines = re.split("\n", text)
+    lastline = len(lines)
+    if DEBUG:
+        print("Hop count line: ", lines[lastline - 2])
+
+    try:
+        (x, hopcount) = lines[lastline - 2].split(":", 2)
+    except:
+        x = re.findall("(\?|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", text, flags=re.IGNORECASE)
+        hopcount=len(x)-1
+
+    hopcount = int(hopcount)
+    if DEBUG:
+        print("Hop count:")
+
+    if hopcount == 2:
+        if DEBUG:
+            print("This router shares two subnets:", lines[lastline - 5])
+            print("Match this scanner and endhost to the gwsubnetlist:", scanner, endhost)
+
+        entry1=None
+        entry2=None
+        #Find a match with the scanner
+        for i in gwsubnetlist:
+            (gw,subnet)=i
+            #We only care if the entry has both a gateway and subnet, otherwise we cannot do anything with it for now.
+            if gw != None and subnet != None:
+                if subnet.overlaps(ipaddress.ip_network(str(scanner) + "/32")):
+                    #We found the gwsubnetlist entry for the scanner, so save it and find the matching entry for the endhost
+                    entry1=i
+        # Find a match with the endhost
+        for i in gwsubnetlist:
+            (gw, subnet) = i
+            # We only care if the entry has both a gateway and subnet, otherwise we cannot do anything with it for now.
+            if gw != None and subnet != None:
+                if subnet.overlaps(ipaddress.ip_network(str(endhost) + "/32")):
+                    # We found the gwsubnetlist entry for the endhost
+                    entry2 = i
+        if entry1 != None and entry2 != None:
+            if DEBUG:
+                print("These two subnets share a router:",entry1, entry2)
+                try:
+                    routers = MergeRouters(DEBUG, routers, entry1, entry2)
+                except:
+                    if DEBUG:
+                        print("Not a valid next hop: \"" + str(lines[i]) + "\"")
+
+
+
+
+    return(routers)
+
+
+
+
 
 
 
@@ -417,6 +667,9 @@ def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners):
     #Gather traceroute info.
     # This should also provide the information on a Nessus scanner itself, since the first IP will be the scanner.
     (subnets, gateways, routes, scanners)=GetPlugin10287(DEBUG,conn,subnets,gateways,routes,scanners)
+
+
+
 
     # 10551 gives some clues to interfaces via SNMP.  This could potentially be used to make a routing map
 
@@ -438,6 +691,8 @@ def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners):
     #TODO: Need a function that takes data such as traceroute info, and pieces together what gateways might be connected.
 
 
+
+
     if DEBUG:
         print("Summary of information collected from all plugins")
         print("Returned IP addresses:", ipaddresses)
@@ -446,6 +701,9 @@ def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners):
         print("Gateways:",gateways)
         print("Scanners:",scanners)
         print("Routes:",routes)
+
+
+
 
 
 
@@ -481,6 +739,96 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
     return(tio)
 
 
+def CreateMapPlotRouters(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
+    # build a blank graph
+    G = nx.Graph()
+    y=1
+    x=0.1
+    subnetyoffset=0.7
+
+    data = []
+    layout = {
+        'xaxis': {
+            'range': [0, 20],
+            'visible': False,
+            'showline': False,
+            'zeroline': True,
+        },
+        'showlegend': False,
+        'yaxis': {
+            'range': [0, 20],
+            'visible': False,
+            'showline': False,
+            'zeroline': True,
+        },
+        'width': 3200,
+        'height': 3200,
+        'shapes': []
+    }
+
+    #Go through all the routers and put a node on the graph
+    for (index,gwlist,snlist) in routers:
+        #Plot the router and merge into the plot data
+        (text, shapeinfo) = PlotRouterShape(DEBUG, x, y, gwlist)
+        for i in shapeinfo:
+            layout['shapes'].append(i)
+        for i in text:
+            data.append(i)
+
+        #Plot each subnet that will be attached to this router
+        subnetx=x
+        subnety=y
+        for subnet in snlist:
+            #Draw the subnet
+            (text, shapeinfo) = PlotSubnetShape(DEBUG, subnetx + 1, subnety + 0.25, str(subnet))
+            for i in shapeinfo:
+                layout['shapes'].append(i)
+            for i in text:
+                data.append(i)
+
+            #Connect the subnet to the router
+            (shapeinfo) = DrawElbowConnector(DEBUG, subnetx + 1, subnety + 0.3, subnetx + 0.7, subnety + 0.3, subnetx + 0.7, y+0.3, x+0.5, y+0.3)
+
+            #(shapeinfo) = DrawStraightConnector(DEBUG, subnetx + 0.7, subnety + 0.3, x + 0.5, y + 0.3)
+            for i in shapeinfo:
+                layout['shapes'].append(i)
+
+
+            #Try to attach any scanners to the subnet, so check all the scanners
+            scannercount=0
+            for(index,ns) in scanners:
+                #See if this gateway is in the current subnet, and if so, print the name
+                if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
+                    (text, shapeinfo) = PlotNessusScanner(DEBUG, subnetx+2.3+(scannercount*0.7), subnety-0.3, ns)
+                    for i in shapeinfo:
+                        layout['shapes'].append(i)
+                    for i in text:
+                        data.append(i)
+                    #Draw a connector from the scanner to the subnet
+                    (shapeinfo) = DrawElbowConnector(DEBUG, subnetx+1.3, subnety+0.25, subnetx+1.3, subnety+0.15, subnetx+2.5+(scannercount*0.7), subnety+0.15,subnetx+2.5+(scannercount*0.7) , subnety+0.1)
+                    for i in shapeinfo:
+                        layout['shapes'].append(i)
+
+                    scannercount+=1
+            subnety+=subnetyoffset
+        y=y+(len(snlist)*subnetyoffset)
+
+    #Scaling does not work well with the font sizes, so removing this for now
+    #layout['yaxis']['range']=[0,y+3]
+    #layout['xaxis']['range']=[0,y+3]
+    #layout['height']=y*100
+    #layout['width']=y*100
+
+
+
+    fig = go.Figure(data=data,
+                    layout=layout)
+
+    # Open the graph in a browser window
+    plotly.offline.plot(fig, auto_open=True)
+
+
+
 #
 #This map draws an individual subnet, all aligned along 0 on the X-axis,
 # and each new subnet is an increment down the Y-axis.
@@ -491,7 +839,7 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
 #
 # The nodes are drawn separate from the connectors.
 #
-def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
+def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
     # build a blank graph
     G = nx.Graph()
 
@@ -547,7 +895,6 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets):
         for(index,ns) in scanners:
             #See if this gateway is in the current subnet, and if so, print the name
             if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
-                gwtext.append(str(ns))
                 (text, shapeinfo) = PlotNessusScanner(DEBUG, x+2+(scannercount*0.7), y-0.3, ns)
                 for i in shapeinfo:
                     layout['shapes'].append(i)
@@ -801,6 +1148,55 @@ def PlotGatewayShape(DEBUG,x,y,textlist):
         }
     ]
     return(data,shape)
+
+
+#The bottom left corner of the subnet will be at the x and y coordinates supplied
+def PlotRouterShape(DEBUG,x,y,gwlist):
+    size=0.5
+
+    #Create a blank list that will get returned from the function
+    data=[]
+
+    #Figure out how much space we need for the text of each gateway IP
+    listsize=len(gwlist)
+    textinc=(size/(listsize+1))
+    textx=x+(size/2)
+    texty=y+textinc
+
+    #TODO: Test with multiple gateways
+    for gw in gwlist:
+        print("x",x)
+        print("y", y)
+        trace=go.Scatter(
+            x=[textx],
+            y=[texty],
+            text=[str(gw)],
+            textfont=dict([('size',8)]),
+            mode='text',
+            textposition='middle center',
+            hoverinfo='none',
+        )
+        data.append(trace)
+        texty=texty+textinc
+
+    #Create the shape list that will be returned from the function
+    shape = [
+        {
+            'type': 'circle',
+            'xref': 'x',
+            'yref': 'y',
+            'x0': x,
+            'y0': y,
+            'x1': x+size,
+            'y1': y+size,
+            'line': {
+                'color': 'rgba(50, 171, 96, .6)',
+            },
+            'fillcolor': 'rgba(50, 171, 96, .6)',
+        }
+    ]
+    return(data,shape)
+
 
 
 #The bottom left corner of the subnet will be at the x and y coordinates supplied
@@ -1135,6 +1531,11 @@ assets=[]
 #A list of scanners found. Each element is a tuple with an index and the IPv4Address or IPv6Address object representing the IP address.
 scanners=[]
 
+#A list of routing devices.  Each element is a tuple with an index, a list of gateways (IPv4Address and IPv6Address objects),
+#  and a list of subnets  (IPv4Networks and IPv6Networks objects).
+# This should all be calculated from the data from Tenable.
+routers=[]
+
 if accesskey != "" and secretkey != "":
     print("Connecting to cloud.tenable.com with access key", accesskey, "to report on assets")
     try:
@@ -1159,9 +1560,11 @@ if conn == False:
 
 
 GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners)
+AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners,routers)
 CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets)
 
-CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets)
+CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets,routers)
+CreateMapPlotRouters(DEBUG, subnets, gateways, routes, ipaddresses,assets,routers)
 exit(0)
 
 
