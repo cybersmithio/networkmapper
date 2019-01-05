@@ -1,14 +1,32 @@
 #!/usr/bin/python
 #
+# This requires python 3.3 due to the use of the ipaddress library
+#
 # Takes data from Tenable.io or Tenable.sc and makes a network map.
 # Written by: James Smith
 #
-# Version 1.1 - Has functionality to identify when gateways/subnets sharerouters. Jan 3, 2018
-# Version 1.0 - Initial version to gather information and make a basic plot.  Dec 31, 2018
+# Version 3:
+#   * Revamped the variable structure, since it was getting to be a dog's breakfast.
+#   * Added CLI flag to exclude public hosts and subnets from map.
+#   * Create a download file of all the relevant Tenable data, for debugging purposes
+#
+# Version 2 - Has functionality to identify when gateways/subnets sharerouters. Jan 3, 2018
+# Version 1 - Initial version to gather information and make a basic plot.  Dec 31, 2018
 #
 # Future capabilities:
+#     Creates a file with all the information downloaded from Tenable.io.
+#     This file can be used as a source of data in an offline mode, and can be
+#     useful for debugging.
+#
 #   Host count in subnet label
 #   Show router interconnections (if they exist)
+#   Just use data of a certain age
+#   A mode that outputs a visio macro file for drawing the diagram in visio
+#   A list on the subnet page we had 3 lists/tables:
+#       - Non RFC-1918 addresses scanned (public IPs, or subnets of public IPs)
+#       - Class B subnets (internal)
+#       - Class C subnets  (internal)
+#  Summary data on each plot, such as the number of subnets, number of gateways, number of scanners, etc
 #
 # Example usage with environment variables:
 # TIO_ACCESS_KEY=""; export TIO_ACCESS_KEY
@@ -45,12 +63,14 @@ import plotly.graph_objs as go
 import networkx as nx
 
 
-def DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets):
+def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
     TIO=False
     if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
         TIO=True
 
+
     if TIO:
+        #Go through each asset downloaded from Tenable.io, parse the data and store it.
         for asset in conn.assets.list():
             IPV4=False
             IPv6=False
@@ -64,20 +84,26 @@ def DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets):
                         print("This is a multi-homed asset")
                 IPV4=True
                 for i in asset['ipv4']:
-                    ipaddresses.append(tuple([len(ipaddresses),ipaddress.IPv4Address(i)]))
+                    ip=ipaddress.IPv4Address(i)
+                    if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                        if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
+                            tenabledata['ipaddresses'].append(ipaddress.IPv4Address(i))
             if 'ipv6' in asset:
                 if DEBUG:
                     if len(asset['ipv6']) > 1:
                         print("This is a multi-homed asset")
                 IPV6=True
                 for i in asset['ipv6']:
-                    ipaddresses.append(tuple([len(ipaddresses), ipaddress.IPv6Address(i)]))
+                    ip=ipaddress.IPv6Address(i)
+                    if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                        if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
+                            tenabledata['ipaddresses'].append(ipaddress.IPv6Address(i))
             if IPV4 and IPV6:
-                assets.append(tuple([len(assets),asset['id'],asset['ipv4']+asset['ipv6']]))
+                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']+asset['ipv6']]))
             elif IPV4 and not IPV6:
-                assets.append(tuple([len(assets),asset['id'],asset['ipv4']]))
+                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']]))
             elif IPV6 and not IPV4:
-                assets.append(tuple([len(assets),asset['id'],asset['ipv6']]))
+                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv6']]))
             else:
                 if DEBUG:
                     print("This asset had no IP addresses.  Weird, right?!")
@@ -93,15 +119,17 @@ def DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets):
             if DEBUG:
                 print("Asset info:", asset)
             if 'ip' in asset:
-                ipaddresses.append(tuple([len(ipaddresses), ipaddress.IPv4Address(asset['ip'])]))
+                tenabledata['ipaddresses'].append(ipaddress.IPv4Address(asset['ip']))
+                tenabledata['assets'].append(tuple([len(tenabledata['assets']),None,asset['ip']]))
+
 
     if DEBUG:
         print("\n\n\n")
-        print("Assets found:",assets)
-        print("IP addresses found:",ipaddresses)
+        print("Assets found:",tenabledata['assets'])
+        print("IP addresses found:",tenabledata['ipaddresses'])
         print("\n\n\n")
 
-    return(ipaddresses,assets)
+    return(tenabledata)
 
 
 #Takes the subnets and merges them, ensuring no duplicates between the two
@@ -183,7 +211,11 @@ def MergeRouters(DEBUG,routers,entry1, entry2):
             print("MergeRouters: No existing entries, so adding", entry1, entry2)
     else:
         MERGE = False
+        if DEBUG:
+            print("Searching through existing routers entries")
         for i in routers:
+            if DEBUG:
+                print(i)
             (index,gateways,subnets)=i
             #Does one of the new gateways already exist in this entry?
             for j in gateways:
@@ -250,8 +282,10 @@ def MergeRoutes(orig,newnet,newgw):
     return(orig)
 
 
+
+
 #Gathers subnet info from either SecurityCenter or Tenable.io from Plugin 24272
-def GetPlugin24272(DEBUG,conn,ipaddresses,assets,subnets,gateways,routes):
+def GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
     if DEBUG:
         print("Parsing information from all plugin ID 24272")
 
@@ -273,27 +307,24 @@ def GetPlugin24272(DEBUG,conn,ipaddresses,assets,subnets,gateways,routes):
         if DEBUG:
             print("Result info:",i)
         if TIO:
-            (subnets,gateways,routes)=ParsePlugin24272(DEBUG,i['plugin_output'],subnets,gateways,routes)
+            tenabledata=ParsePlugin24272(DEBUG,i['plugin_output'],tenabledata,EXCLUDEPUBLIC)
         else:
-            (subnets,gateways,routes)=ParsePlugin24272(DEBUG,i['pluginText'],subnets,gateways,routes)
+            tenabledata=ParsePlugin24272(DEBUG,i['pluginText'],tenabledata,EXCLUDEPUBLIC)
 
     if DEBUG:
-        print("Summary of information collected from all instances of Plugin 24272")
-        print("Type:",type(subnets))
-        print("Subnets:",subnets)
-        print("Type:",type(subnets))
-        print("Gateways:",gateways)
-        print("Type:",type(subnets))
-        print("Routes:",routes)
+        print("Summary of information collected from  Plugin 24272\n")
+        for i in tenabledata:
+            print(i)
+            print(tenabledata[i],"\n")
 
-        return(ipaddresses, assets, subnets, gateways, routes)
+    return(tenabledata)
 
 
 
 
 #Takes the text which should be from a Plugin Output for Plugin ID 24272, and parses it.
 #Merges the data with the existing subnets, gateways, and routes lists, and then returns those.
-def ParsePlugin24272(DEBUG,text,subnets,gateways,routes):
+def ParsePlugin24272(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
     if DEBUG:
         print("Parsing plugin text from 24272",text)
     for i in re.findall("IPAddress/IPSubnet = ([0-9\.]*\/[0-9\.]*)",text,flags=re.IGNORECASE+re.MULTILINE):
@@ -324,24 +355,25 @@ def ParsePlugin24272(DEBUG,text,subnets,gateways,routes):
             if DEBUG:
                 print("Saving subnet:")
             if n1 != defaultroute:
-                subnets = MergeSubnets(subnets, n1)
+                if EXCLUDEPUBLIC == False or (EXCLUDEPUBLIC == True and n1.is_private ):
+                    tenabledata['subnets'] = MergeSubnets(tenabledata['subnets'], n1)
             if not gw=="0.0.0.0":
                 #Only save the gateway and route if the gateway is not 0.0.0.0
-                gateways = MergeGateways(DEBUG, gateways, ipaddress.IPv4Address(gw))
-                routes = MergeRoutes(routes, n1,ipaddress.IPv4Address(gw))
+                tenabledata['gateways'] = MergeGateways(DEBUG, tenabledata['gateways'], ipaddress.IPv4Address(gw))
+                tenabledata['routes'] = MergeRoutes(tenabledata['routes'], n1,ipaddress.IPv4Address(gw))
 
     if DEBUG:
         print("Summary of information collected")
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Routes:",routes)
+        print("Subnets:",tenabledata['subnets'])
+        print("Gateways:",tenabledata['gateways'])
+        print("Routes:",tenabledata['routes'])
         print("\n\n\n")
 
-    return(subnets,gateways,routes)
+    return(tenabledata)
 
 
 #Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10663
-def GetPlugin10663(DEBUG,conn,subnets,gateways,routes):
+def GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
     if DEBUG:
         print("Parsing information from all plugin ID 10663")
 
@@ -363,22 +395,22 @@ def GetPlugin10663(DEBUG,conn,subnets,gateways,routes):
         if DEBUG:
             print("Result info:",i)
         if TIO:
-            (subnets, gateways, routes) = ParsePlugin10663(DEBUG, i['plugin_output'], subnets, gateways, routes)
+            tenabledata = ParsePlugin10663(DEBUG, i['plugin_output'], tenabledata,EXCLUDEPUBLIC)
         else:
-            (subnets,gateways,routes)=ParsePlugin10663(DEBUG,i['pluginText'],subnets,gateways,routes)
+            tenabledata=ParsePlugin10663(DEBUG,i['pluginText'],tenabledata,EXCLUDEPUBLIC)
 
     if DEBUG:
-        print("Summary of information collected from all instances of Plugin 10663")
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Routes:",routes)
+        print("Summary of information collected from  Plugin 10663\n")
+        for i in tenabledata:
+            print(i)
+            print(tenabledata[i],"\n")
 
-    return(subnets,gateways,routes)
+    return(tenabledata)
 
 
-#Takes the text which should be from a Plugin Output for Plugin ID 24272, and parses it.
+#Takes the text which should be from a Plugin Output for Plugin ID 10663, and parses it.
 #Merges the data with the existing subnets, gateways, and routes lists, and then returns those.
-def ParsePlugin10663(DEBUG,text,subnets,gateways,routes):
+def ParsePlugin10663(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
     if DEBUG:
         print("Parsing plugin text from 10663",text)
     gw=""
@@ -386,7 +418,7 @@ def ParsePlugin10663(DEBUG,text,subnets,gateways,routes):
         if DEBUG:
             print("Router found:",i)
         gw=i
-        gateways = MergeGateways(DEBUG,gateways, ipaddress.IPv4Address(gw))
+        tenabledata['gateways'] = MergeGateways(DEBUG,tenabledata['gateways'], ipaddress.IPv4Address(gw))
 
     netmask=""
     for i in re.findall("Netmask : ([0-9\.]+)",text,flags=re.IGNORECASE+re.MULTILINE):
@@ -402,16 +434,17 @@ def ParsePlugin10663(DEBUG,text,subnets,gateways,routes):
 
     if ipaddr != "" and netmask != "":
         s1 = ipaddress.ip_network(ipaddr+"/"+netmask,strict=False)
-        subnets=MergeSubnets(subnets,s1)
+        if EXCLUDEPUBLIC == False or (EXCLUDEPUBLIC == True and s1.is_private):
+            tenabledata['subnets']=MergeSubnets(tenabledata['subnets'],s1)
         if gw != "":
-            routes=MergeRoutes(routes,s1,ipaddress.IPv4Address(gw))
+            tenabledata['routes']=MergeRoutes(tenabledata['routes'],s1,ipaddress.IPv4Address(gw))
 
 
-    return(subnets,gateways,routes)
+    return(tenabledata)
 
 
 #Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10287
-def GetPlugin10287(DEBUG,conn,subnets,gateways,routes,scanners):
+def GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
     if DEBUG:
         print("Parsing information from all plugin ID 10287")
 
@@ -433,22 +466,23 @@ def GetPlugin10287(DEBUG,conn,subnets,gateways,routes,scanners):
         if DEBUG:
             print("Result info:",i)
         if TIO:
-            (subnets, gateways, routes,scanners) = ParsePlugin10287(DEBUG, i['plugin_output'], subnets, gateways, routes,scanners)
+            tenabledata = ParsePlugin10287(DEBUG, i['plugin_output'], tenabledata,EXCLUDEPUBLIC)
         else:
-            (subnets,gateways,routes,scanners)=ParsePlugin10287(DEBUG,i['pluginText'],subnets,gateways,routes,scanners)
+            tenabledata=ParsePlugin10287(DEBUG,i['pluginText'],tenabledata,EXCLUDEPUBLIC)
 
     if DEBUG:
-        print("Summary of information collected from all instances of Plugin 10287")
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Routes:",routes)
+        print("Summary of information collected from  Plugin 10287\n")
+        for i in tenabledata:
+            print(i)
+            print(tenabledata[i],"\n")
 
-    return(subnets,gateways,routes,scanners)
+    return(tenabledata)
 
 
 #Takes the text which should be from a Plugin Output for Plugin ID 10287, and parses it.
 #Merges the data with the existing subnets, gateways, and routes lists, and then returns those.
-def ParsePlugin10287(DEBUG,text,subnets,gateways,routes,scanners):
+#TODO: Make this work with IPv6 as well
+def ParsePlugin10287(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
     #First, split the plugin output.
     #Assumptions:
     # First line will always be "For your information, here is the traceroute from"...
@@ -456,53 +490,137 @@ def ParsePlugin10287(DEBUG,text,subnets,gateways,routes,scanners):
     # The remaining lines will be IP addresses or possibly symbols like (?) until the "Hop Count line"
     # The first IP address will always be the scanner.
     if DEBUG:
-        print("Parsing plugin text from 10287",text)
+        print("Parsing plugin text from 10287\n",text)
 
-    for (scanner,endhost) in re.findall("For your information, here is the traceroute from (.*) to (.*) :",text,flags=re.IGNORECASE):
-        if DEBUG:
-            print("The scanner IP address is: \"" + str(scanner) + "\"")
-        scanners = MergeScanners(scanners, ipaddress.IPv4Address(scanner))
 
-    FIRSTIP=True
+    FOUNDINFO=False
+    FOUNDHOP=False
+    FIRSTHOP=True
+    previoushop=None
+    IGNOREPUBLIC=False
+
     lines=re.split("\n",text)
-    lastaddress=len(lines)-4
+    gwlist=[]
     if DEBUG:
         print("Total lines found:",len(lines))
+    scanner=""
+    endhost=""
     for i in range(0,len(lines)):
-        if i > 1 and i < lastaddress:
+        #If we have not already see the "For your information" line, look for it.
+        if DEBUG:
+            print("Next line to examine \""+str(lines[i])+"\"")
+        if FOUNDINFO == False:
             if DEBUG:
-                print("The next hop is : \""+str(lines[i])+"\"")
+                print("Is this the \"For your information \" line?")
             try:
-                gateways = MergeGateways(DEBUG, gateways, ipaddress.IPv4Address(lines[i]))
-            except:
-                if DEBUG:
-                    print("Not a valid next hop: \"" + str(lines[i]) + "\"")
+                for (scanner, endhost) in re.findall("For your information, here is the traceroute from (.*) to (.*) :", lines[i], flags=re.IGNORECASE):
+                    if DEBUG:
+                        print("The scanner IP address is: \"" + str(scanner) + "\"")
+                        print("The target address is: \"" + str(endhost) + "\"")
+                    tenabledata['scanners'] = MergeScanners(tenabledata['scanners'], ipaddress.IPv4Address(scanner))
+                    FOUNDINFO=True
+                    if EXCLUDEPUBLIC == True and not ipaddress.IPv4Address(scanner).is_private:
+                        IGNOREPUBLIC=True
 
+                    if EXCLUDEPUBLIC == True and not ipaddress.IPv4Address(endhost).is_private:
+                        IGNOREPUBLIC=True
+                if IGNOREPUBLIC:
+                    #This is a traceroute involving public endpoints, so ignore
+                    break
+            except:
+                    print("Error parsing ",lines[i])
+                    print(sys.exc_info()[0], sys.exc_info()[1])
+        elif FOUNDHOP == True and lines[i] == "":
+            #Still need to check since the last hop might not respond
+            if DEBUG:
+                print("End of the hop list found.")
+            break
+        elif FOUNDHOP == False or (FOUNDHOP == True and i != ""):
+            if DEBUG:
+                print("Is this a hop?")
+            #If we are here, we have yet to find the first hop, or is has been found and we are in the hop list
+            #First, see if we have found a hop yet.
+            if lines[i] == scanner:
+                #We don't care about the first hop because that's the scanner
+                FOUNDHOP=True
+                FIRSTHOP=False
+                previoushop=ipaddress.IPv4Address(scanner)
+                if DEBUG:
+                    print("Ignoring first hop")
+            elif lines[i] == endhost:
+                #We don't care about the last hop because that's the endpoint being scanned
+                FOUNDHOP=True
+                FIRSTHOP=False
+                if DEBUG:
+                    print("End of the hop list found.")
+                break
+            elif lines[i] == "?":
+                if DEBUG:
+                    print("Found hop that did not respond back")
+                #We found a hop that didn't respond back.
+                #If this is the first hop, don't bother adding it.
+                #If not the first hop, then add a None to the gwlist.
+                if FIRSTHOP == False:
+                    gwlist.append(None)
+                FOUNDHOP=True
+                FIRSTHOP=False
+                previoushop=None
+            else:
+                if DEBUG:
+                    print("Attemping to parse line for hop data",lines[i])
+                for j in re.findall("([0-9\.]+)", lines[i], flags=re.IGNORECASE):
+                    #We found a hop
+                    if DEBUG:
+                        print("The next hop is : \"" + str(j) + "\"")
+                    try:
+                        currenthop=ipaddress.IPv4Address(j)
+                    except:
+                        if DEBUG:
+                            print("Not a valid next hop: \"" + str(j) + "\"")
+                        currenthop=None
+                    if previoushop == currenthop and currenthop != None:
+                        print("Routing loop discovered")
+                    else:
+                        tenabledata['gateways'] = MergeGateways(DEBUG, tenabledata['gateways'], ipaddress.IPv4Address(j))
+                        gwlist.append(ipaddress.IPv4Address(j))
+                    FOUNDHOP = True
+                    FIRSTHOP = False
+                    previoushop=currenthop
+        else:
+            print("Unknown state in parsing plugin 10287",text)
+
+    #Only add the traceroute data if there is actually a router involved.
+    #It is unnecessary to include every bit of traceroute between hosts on the same subnet.
+    if len(gwlist) > 0:
+        if DEBUG:
+            print("Adding this traceroute:",gwlist)
+            print("Total hops for this traceroute:",len(gwlist))
+        tenabledata['traceroutes'].append(tuple([len(tenabledata['traceroutes']),scanner,endhost,gwlist]))
 
     if DEBUG:
-        print("Summary of information collected")
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Routes:",routes)
+        print("Summary of information collected after parsing one instance of Plugin 10287")
+        print("Gateways:",tenabledata['gateways'])
+        print("Traceroutes:",tenabledata['traceroutes'])
         print("\n\n\n")
 
-    return(subnets,gateways,routes,scanners)
+    return(tenabledata)
 
 
-def AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners,routers):
+def AnalyzeRouters(DEBUG,tenabledata):
     if DEBUG:
         print("Reviewing plugin ID 10287 along with subnets and gateways to determine routers")
-
-
 
     gwsubnetlist=[]
     #First go through all the gateways and match them with their associated subnets
     # A list of gateways found.  Each element is a tuple with the an index and the IPv4Address or IPv6Address object representing the gateway.
-    for i in gateways:
+    if DEBUG:
+        print("Gateways:",tenabledata['gateways'])
+
+    for i in tenabledata['gateways']:
         (gwi,gwaddr)=i
         # A list of subnets found.  Each element is a tuple with the an index and the IPv4Network or IPv6Network object representing the subnet.
         SNFOUND=False
-        for j in subnets:
+        for j in tenabledata['subnets']:
             (subneti,subnet)=j
 
             if subnet.overlaps(ipaddress.ip_network(str(gwaddr) + "/32")):
@@ -514,10 +632,10 @@ def AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanner
             gwsubnetlist.append(tuple([gwaddr, None]))
 
     #Now go through all the subnets and to catch all the subnets that might not have gateways discovered.
-    for i in subnets:
+    for i in tenabledata['subnets']:
         (subneti, subnet) = i
         GWFOUND=False
-        for j in gateways:
+        for j in tenabledata['gateways']:
             (gwi, gwaddr) = j
             if subnet.overlaps(ipaddress.ip_network(str(gwaddr) + "/32")):
                 GWFOUND=True
@@ -532,32 +650,44 @@ def AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanner
 
 
 
-    #Assume we're using a SecurityCenter connection unless we know the connection is for Tenable.io
-    TIO=False
-    if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
-        TIO=True
-
-    try:
-        if TIO:
-            results=conn.workbenches.vuln_outputs(10287)
-        else:
-            results = conn.analysis.vulns(('pluginID', '=', '10287'), tool="vulndetails")
-    except:
-        results=[]
-        print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
-
     #Parse all the traceroute results and use that to start matching up subnets.
     # This may not match everything, so afterwards all the subnets and gateways must be re-examined and compared to the routers.
-    for i in results:
-        if DEBUG:
-            print("Result info:",i)
-        if TIO:
-            routers = ParsePlugin10287ForRouters(DEBUG, i['plugin_output'], gwsubnetlist,routers)
-        else:
-            routers=ParsePlugin10287ForRouters(DEBUG,i['pluginText'],gwsubnetlist,routers)
+    for (tri,scanner,endhost,gwlist) in tenabledata['traceroutes']:
+        #tenabledata['traceroutes'].append(tuple([len(tenabledata['traceroutes']),scanner,endhost,gwlist]))
+        if len(gwlist) == 1:
+            if DEBUG:
+                print("This router shares two subnets:", gwlist)
+                print("Match this scanner and endhost to the gwsubnetlist:", scanner, endhost)
+
+            entry1 = None
+            entry2 = None
+            # Find a match with the scanner
+            for i in gwsubnetlist:
+                (gw, subnet) = i
+                # We only care if the entry has both a gateway and subnet, otherwise we cannot do anything with it for now.
+                if gw != None and subnet != None:
+                    if subnet.overlaps(ipaddress.ip_network(str(scanner) + "/32")):
+                        # We found the gwsubnetlist entry for the scanner, so save it and find the matching entry for the endhost
+                        entry1 = i
+            # Find a match with the endhost
+            for i in gwsubnetlist:
+                (gw, subnet) = i
+                # We only care if the entry has both a gateway and subnet, otherwise we cannot do anything with it for now.
+                if gw != None and subnet != None:
+                    if subnet.overlaps(ipaddress.ip_network(str(endhost) + "/32")):
+                        # We found the gwsubnetlist entry for the endhost
+                        entry2 = i
+            if entry1 != None and entry2 != None:
+                if DEBUG:
+                    print("These two subnets share a router:", entry1, entry2)
+                    try:
+                        tenabledata['routers'] = MergeRouters(DEBUG, tenabledata['routers'], entry1, entry2)
+                    except:
+                        if DEBUG:
+                            print("Not a valid next hop: \"" + str(lines[i]) + "\"")
 
     if DEBUG:
-        print("Here are the routers:",routers)
+        print("Here are the routers:",tenabledata['routers'])
 
 
     #Now lets add any subnets or gateways that do not share any routers.
@@ -566,7 +696,7 @@ def AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanner
         if subnet != None:
             if DEBUG:
                 print("Checking if subnet",subnet,"already has an entry on a router")
-            for (ri,gwlist,snlist) in routers:
+            for (ri,gwlist,snlist) in tenabledata['routers']:
                 if DEBUG:
                     print("Checking for subnet",subnet,"in subnet list",snlist)
                 try:
@@ -577,19 +707,20 @@ def AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanner
             if SUBNETFOUND == False:
                 if DEBUG:
                     print("This subnet was not found on any existing router entry, so adding an entry for",gw,subnet)
-                routers.append(tuple([len(routers),[gw],[subnet]]))
+                tenabledata['routers'].append(tuple([len(tenabledata['routers']),[gw],[subnet]]))
             else:
                 if DEBUG:
                     print("This subnet already exists in a router entry, so not adding")
 
-    return(routers)
+    return(tenabledata['gateways'])
 
 # Assume that if a subnet is "Hop Count: 2" then the subnet of the scanner and the subnet of the host is separated
 # by only one router, so that router can be identified.
 # TODO: This should not just be about matching subnets, but also adding in single entries for gateways and subnets that might not be directly connected
-def ParsePlugin10287ForRouters(DEBUG,text,gwsubnetlist,routers):
+def ParsePlugin10287ForRouters(DEBUG,text,gwsubnetlist,tenabledata):
     if DEBUG:
         print("Determining which subnets share routers from Plugin 10287 output:", text)
+
 
     for (scanner, endhost) in re.findall("For your information, here is the traceroute from (.*) to (.*) :", text, flags=re.IGNORECASE):
         if DEBUG:
@@ -638,7 +769,7 @@ def ParsePlugin10287ForRouters(DEBUG,text,gwsubnetlist,routers):
             if DEBUG:
                 print("These two subnets share a router:",entry1, entry2)
                 try:
-                    routers = MergeRouters(DEBUG, routers, entry1, entry2)
+                    tenabledata['routers'] = MergeRouters(DEBUG, tenabledata['routers'], entry1, entry2)
                 except:
                     if DEBUG:
                         print("Not a valid next hop: \"" + str(lines[i]) + "\"")
@@ -646,29 +777,126 @@ def ParsePlugin10287ForRouters(DEBUG,text,gwsubnetlist,routers):
 
 
 
-    return(routers)
+    return(tenabledata)
 
 
+def SetJSONDefault(obj):
+    if isinstance(obj,ipaddress.IPv4Address):
+        return str(obj)
+    if isinstance(obj,ipaddress.IPv6Address):
+        return str(obj)
+    if isinstance(obj,ipaddress.IPv4Network):
+        return str(obj)
+    if isinstance(obj,ipaddress.IPv6Network):
+        return str(obj)
+    print("Need handler for object type",type(obj))
+    raise TypeError
 
 
+#Gathers subnet info from either SecurityCenter or Tenable.io from Plugin 24272
+def DumpPluginsToFile(DEBUG,outfp,tenabledata):
+    if DEBUG:
+        print("Downloading all plugin information to a file")
 
+    try:
+        json.dump(tenabledata,outfp,default=SetJSONDefault)
+    except:
+        print("Error writing data to json", sys.exc_info()[0], sys.exc_info()[1])
+        return(False)
 
+    return(True)
 
+def ParseOfflineFile(DEBUG,offlinefile):
+    if offlinefile == None:
+        return(False)
 
-def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners):
-    (ipaddresses, assets)=DownloadAssetInfoIO(DEBUG,conn,ipaddresses,assets)
+    infp=open(offlinefile,"r")
+    tenabledata=json.load(infp)
+    infp.close()
+    print(tenabledata)
+
+    x=[]
+    for i in tenabledata['ipaddresses']:
+        try:
+            x.append(ipaddress.IPv4Address(i))
+        except:
+            x.append(ipaddress.IPv6Address(i))
+    tenabledata['ipaddresses']=x
+
+    x=[]
+    for i in tenabledata['assets']:
+        (a,b,c)=i
+        y=[]
+        for j in c:
+            try:
+                y.append(ipaddress.IPv4Address(j))
+            except:
+                y.append(ipaddress.IPv6Address(j))
+        x.append(tuple([a,b,y]))
+    tenabledata['assets']=x
+
+    x = []
+    for i in tenabledata['subnets']:
+        (a, b) = i
+        try:
+            x.append(tuple([a,ipaddress.IPv4Network(b)]))
+        except:
+            x.append(tuple([a,ipaddress.IPv6Network(b)]))
+    tenabledata['subnets']=x
+
+    x = []
+    for i in tenabledata['gateways']:
+        (a, b) = i
+        try:
+            x.append(tuple([a,ipaddress.IPv4Address(b)]))
+        except:
+            x.append(tuple([a,ipaddress.IPv6Address(b)]))
+    tenabledata['gateways']=x
+
+    x=[]
+    for i in tenabledata['routes']:
+        (a,b,c)=i
+        try:
+            gw=ipaddress.IPv4Network(j)
+        except:
+            gw=ipaddress.IPv6Network(j)
+        try:
+            subnet=ipaddress.IPv4Address(j)
+        except:
+            subnet=ipaddress.IPv6Address(j)
+
+        x.append(tuple([a,gw,subnet]))
+    tenabledata['routes']=x
+
+    x = []
+    for i in tenabledata['scanners']:
+        (a, b) = i
+        try:
+            x.append(tuple([a,ipaddress.IPv4Address(b)]))
+        except:
+            x.append(tuple([a,ipaddress.IPv6Address(b)]))
+    tenabledata['scanners']=x
+
+    outfp=open("test.txt","w")
+    DumpPluginsToFile(DEBUG,outfp,tenabledata)
+    outfp.close
+
+    return(tenabledata)
+
+def GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC):
+    print("Starting information gathering.")
+
+    tenabledata=DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
 
     #Gather interface enumeration
-    (ipaddresses,assets,subnets,gateways,routes)=GetPlugin24272(DEBUG,conn,ipaddresses,assets,subnets,gateways,routes)
+    tenabledata=GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
 
     #Gather info from DHCP
-    (subnets, gateways, routes)=GetPlugin10663(DEBUG,conn,subnets,gateways,routes)
+    tenabledata=GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
 
     #Gather traceroute info.
     # This should also provide the information on a Nessus scanner itself, since the first IP will be the scanner.
-    (subnets, gateways, routes, scanners)=GetPlugin10287(DEBUG,conn,subnets,gateways,routes,scanners)
-
-
+    tenabledata=GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
 
 
     # 10551 gives some clues to interfaces via SNMP.  This could potentially be used to make a routing map
@@ -679,32 +907,38 @@ def GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners):
     #Plugin ID 132 can sometimes provide information about other IP or MAC addresses on the system.
     # (i.e. 192.168.15.1 belongs to 192.168.16.1 because this plugin says so, and the hostname is the same)
 
+    #Need a plugin to get subnet data from Windows and Linux
+
+    #52616
+
+    #10180 could be used to determine how big the local subnet is for the Nessus scanner, if there are no other options.
+    #If this plugin has "Hardware address : " in the output text, you know it is on the same subnet as the scanner.  This would need the scanner info from 19506 as well.
+
 
     #Plugin ID 19 can show that there are multiple VLANs on a host, potentially indicating a gateway
 
     #56310 can show some network information from the iptables, but this may not indicate actual network subnets.
     #It may be more zones.
 
+    #25203 for linux system IP address info
 
     #35716 gives important information on MAC address matches for assets.
 
     #TODO: Need a function that takes data such as traceroute info, and pieces together what gateways might be connected.
 
 
-
-
     if DEBUG:
-        print("Summary of information collected from all plugins")
-        print("Returned IP addresses:", ipaddresses)
-        print("Returned assets:", ipaddresses)
-        print("Subnets:",subnets)
-        print("Gateways:",gateways)
-        print("Scanners:",scanners)
-        print("Routes:",routes)
+        print("Summary of information collected from all plugins\n")
+        for i in tenabledata:
+            print(i)
+            print(tenabledata[i],"\n")
 
+    if outputfile != None:
+        outfp=open(outputfile,"w")
+        DumpPluginsToFile(DEBUG,outfp,tenabledata)
+        outfp.close
 
-
-
+    return(tenabledata)
 
 
 #Attempts to make a connection to Tenable.sc
@@ -739,7 +973,7 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
     return(tio)
 
 
-def CreateMapPlotRouters(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
+def CreateMapPlotRouters(DEBUG,tenabledata):
     # build a blank graph
     G = nx.Graph()
     y=1
@@ -767,7 +1001,7 @@ def CreateMapPlotRouters(DEBUG,subnets,gateways,routes,ipaddresses,assets,router
     }
 
     #Go through all the routers and put a node on the graph
-    for (index,gwlist,snlist) in routers:
+    for (index,gwlist,snlist) in tenabledata['routers']:
         #Plot the router and merge into the plot data
         (text, shapeinfo) = PlotRouterShape(DEBUG, x, y, gwlist)
         for i in shapeinfo:
@@ -796,7 +1030,7 @@ def CreateMapPlotRouters(DEBUG,subnets,gateways,routes,ipaddresses,assets,router
 
             #Try to attach any scanners to the subnet, so check all the scanners
             scannercount=0
-            for(index,ns) in scanners:
+            for(index,ns) in tenabledata['scanners']:
                 #See if this gateway is in the current subnet, and if so, print the name
                 if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
                     (text, shapeinfo) = PlotNessusScanner(DEBUG, subnetx+2.3+(scannercount*0.7), subnety-0.3, ns)
@@ -839,7 +1073,7 @@ def CreateMapPlotRouters(DEBUG,subnets,gateways,routes,ipaddresses,assets,router
 #
 # The nodes are drawn separate from the connectors.
 #
-def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
+def CreateMapPlot(DEBUG,tenabledata):
     # build a blank graph
     G = nx.Graph()
 
@@ -868,7 +1102,7 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
     }
 
     #Go through all the subnets and put a node on the graph
-    for (index,subnet) in subnets:
+    for (index,subnet) in tenabledata['subnets']:
         (text, shapeinfo) = PlotSubnetShape(DEBUG, x+0.7, y+0.25, str(subnet))
         for i in shapeinfo:
             layout['shapes'].append(i)
@@ -877,7 +1111,7 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
 
         #Try to attach a gateway to each subnet, so check all the gateways
         gwtext=[]
-        for(index,gw) in gateways:
+        for(index,gw) in tenabledata['gateways']:
             #See if this gateway is in the current subnet, and if so, print the name
             if subnet.overlaps(ipaddress.ip_network(str(gw)+"/32")):
                 gwtext.append(str(gw))
@@ -892,7 +1126,7 @@ def CreateMapPlot(DEBUG,subnets,gateways,routes,ipaddresses,assets,routers):
 
         #Try to attach any scanners to the subnet, so check all the scanners
         scannercount=0
-        for(index,ns) in scanners:
+        for(index,ns) in tenabledata['scanners']:
             #See if this gateway is in the current subnet, and if so, print the name
             if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
                 (text, shapeinfo) = PlotNessusScanner(DEBUG, x+2+(scannercount*0.7), y-0.3, ns)
@@ -1006,8 +1240,6 @@ def CreateTestPattern(DEBUG):
     plotly.offline.plot(fig, auto_open=True)
 
 
-
-
 def PlotShapeCircle(DEBUG):
     layout = {
         'xaxis': {
@@ -1117,8 +1349,9 @@ def PlotGatewayShape(DEBUG,x,y,textlist):
 
     #TODO: Test with multiple gateways
     for text in textlist:
-        print("x",x)
-        print("y", y)
+        if DEBUG:
+            print("x",x)
+            print("y", y)
         trace=go.Scatter(
             x=[textx],
             y=[texty],
@@ -1165,8 +1398,9 @@ def PlotRouterShape(DEBUG,x,y,gwlist):
 
     #TODO: Test with multiple gateways
     for gw in gwlist:
-        print("x",x)
-        print("y", y)
+        if DEBUG:
+            print("x",x)
+            print("y", y)
         trace=go.Scatter(
             x=[textx],
             y=[texty],
@@ -1308,7 +1542,7 @@ def PlotSubnetShape(DEBUG,x,y,text):
     return(data,shape)
 
 
-def CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets):
+def CreateSubnetSummary(DEBUG, tenabledata):
     connectorthickness = 0.5
     connectorcolor = '#000'
     nodesize = 10
@@ -1326,7 +1560,7 @@ def CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets):
     nodecolor=[]
 
     #Go through all the subnets and put a node on the graph
-    for (index,subnet) in subnets:
+    for (index,subnet) in tenabledata['subnets']:
 
         #New subnet, let's add a node.
         G.add_node(index,pos=(0,y))
@@ -1430,6 +1664,60 @@ def CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets):
     plotly.offline.plot(fig, auto_open=True)
 
 
+def AnalyzeFreeAddresses(DEBUG,tenabledata):
+
+    freeaddresses=[]
+    for address in tenabledata['ipaddresses']:
+        NOSUBNET=True
+        for (sni, subnet) in tenabledata['subnets']:
+            if type(address) == ipaddress.IPv4Address:
+                if DEBUG:
+                    print("Checking if",ipaddress.ip_network(str(address)+"/32"),"is in subnet",subnet)
+                if subnet.overlaps(ipaddress.ip_network(str(address)+"/32")):
+                    if DEBUG:
+                        print("YES, this ip belongs to this network")
+                    NOSUBNET=False
+            else:
+                #TODO: Make test case to confirm this line works
+                if subnet.overlaps(ipaddress.ip_network(str(address) + "/128")):
+                    NOSUBNET = False
+        if NOSUBNET == True:
+            freeaddresses.append(address)
+
+    if DEBUG:
+        print("\n\n\nThese IP addresses exist but there was not enough subnet information about them to put onto diagram (total of " \
+            +str(len(freeaddresses))+" out of "+str(len(tenabledata['ipaddresses']))+"):\n\n",freeaddresses)
+
+    #Go through the addresses, convert them into their classful equivalents, and create subnets based on that.
+    subnets=[]
+    classa = ipaddress.IPv4Network("0.0.0.0/1")
+    classb = ipaddress.IPv4Network("128.0.0.0/2")
+    classc = ipaddress.IPv4Network("192.0.0.0/3")
+    for address in freeaddresses:
+        if isinstance(address,ipaddress.IPv4Address):
+            if classa.overlaps(ipaddress.ip_network(str(address) + "/32")):
+                i=ipaddress.IPv4Interface(str(address) + "/8")
+                if DEBUG:
+                    print("Class A address:",address,"becomes",i.network)
+                tenabledata['subnets']=MergeSubnets(tenabledata['subnets'],i.network)
+            elif classb.overlaps(ipaddress.ip_network(str(address) + "/32")):
+                i = ipaddress.IPv4Interface(str(address) + "/16")
+                if DEBUG:
+                    print("Class B address:", address,"becomes",i.network)
+                tenabledata['subnets'] = MergeSubnets(tenabledata['subnets'], i.network)
+            elif classc.overlaps(ipaddress.ip_network(str(address) + "/32")):
+                i = ipaddress.IPv4Interface(str(address) + "/24")
+                if DEBUG:
+                    print("Class C address:",address,"becomes",i.network)
+                tenabledata['subnets'] = MergeSubnets(tenabledata['subnets'], i.network)
+        else:
+            if DEBUG:
+                print("Nothing to be done with an IPv6 address:",address)
+
+    print("Subnets derived from free IP addresses",subnets)
+
+    return(tenabledata)
+
 
 ######################
 ###
@@ -1449,14 +1737,22 @@ parser.add_argument('--host',help="The Tenable.io host. (Default is cloud.tenabl
 parser.add_argument('--port',help="The Tenable.io port. (Default is 443)",nargs=1,action="store")
 parser.add_argument('--debug',help="Turn on debugging",action="store_true")
 parser.add_argument('--testpattern',help="Draw a test pattern",action="store_true")
+parser.add_argument('--outputfile',help="A file to dump all the raw data into, for debugging or offline use.",nargs=1,action="store")
+parser.add_argument('--offlinefile',help="A file from a previous run of the networkmapper, which can be used to generate a map offline.",nargs=1,action="store")
+parser.add_argument('--excludepublic',help="Do not include public IPv4 ranges when mapping",action="store_true")
 
 args=parser.parse_args()
 
 DEBUG=False
+EXCLUDEPUBLIC=False
 
 if args.debug:
     DEBUG=True
     print("Debugging is enabled.")
+
+if args.excludepublic:
+    EXCLUDEPUBLIC=True
+    print("Excluding public IP addresses and subnets.")
 
 if args.testpattern:
     CreateTestPattern(DEBUG)
@@ -1493,6 +1789,9 @@ except:
 try:
     if args.username[0] != "":
         username = args.username[0]
+        #Since a specific username was found on the command line, assume the user does not want to poll Tenable.io
+        secretkey = ""
+        accesskey = ""
 except:
     username=""
 
@@ -1503,7 +1802,6 @@ try:
 except:
     password=""
 
-
 try:
     if args.port[0] != "":
         port = args.port[0]
@@ -1511,60 +1809,82 @@ except:
     port = "443"
 
 
+outputfile = None
+try:
+    if args.outputfile[0] != "":
+        outputfile = args.outputfile[0]
+except:
+#    outputfile = "networkmapper.temp"
+    outputfile = None
 
+
+offlinefile = None
+try:
+    if args.offlinefile[0] != "":
+        offlinefile = args.offlinefile[0]
+except:
+    offlinefile = None
+
+
+tenabledata={}
+# Create the data structures for normalization
+#A list of IP addresses found.  Each element is a tuple with an index and the IPv4Address or IPv6Address object representing the IP address.
+tenabledata['ipaddresses'] = []
+#A list of assets found.  Each element is a tuple with an index, an asset ID, and a list of  IPv4Address and IPv6Address objects.
+tenabledata['assets'] = []
 #A list of subnets found.  Each element is a tuple with the an index and the IPv4Network or IPv6Network object representing the subnet.
-subnets=[]
+tenabledata['subnets'] = []
 
 #A list of gateways found.  Each element is a tuple with the an index and the IPv4Address or IPv6Address object representing the gateway.
-gateways=[]
-
+tenabledata['gateways'] = []
 #A list of routes found.  Each element is a tuple with the an index, the IPv4Network or IPv6Network object
 # and an IPv4Address or IPv6Address object for the gateway.
-routes=[]
-
-#A list of IP addresses found.  Each element is a tuple with an index and the IPv4Address or IPv6Address object representing the IP address.
-ipaddresses=[]
-
-#A list of assets found.  Each element is a tuple with an index, an asset ID, and a list of  IPv4Address and IPv6Address objects.
-assets=[]
-
-#A list of scanners found. Each element is a tuple with an index and the IPv4Address or IPv6Address object representing the IP address.
-scanners=[]
-
+tenabledata['routes'] = []
+#A list of scanners found. Each element is a tuple with an index, the type of scanner, and the IPv4Address or IPv6Address object representing the IP address.
+tenabledata['scanners'] = []
 #A list of routing devices.  Each element is a tuple with an index, a list of gateways (IPv4Address and IPv6Address objects),
 #  and a list of subnets  (IPv4Networks and IPv6Networks objects).
 # This should all be calculated from the data from Tenable.
-routers=[]
+tenabledata['routers'] = []
 
-if accesskey != "" and secretkey != "":
-    print("Connecting to cloud.tenable.com with access key", accesskey, "to report on assets")
-    try:
-        if args.host[0] != "":
-            host = args.host[0]
-    except:
-        host = "cloud.tenable.com"
-    conn=ConnectIO(DEBUG,accesskey,secretkey,host,port)
-elif username != "" and password != "":
-    try:
-        if args.host[0] != "":
-            host = args.host[0]
-    except:
-        host = "127.0.0.1"
-    print("Connecting to SecurityCenter with username "+str(username)+" @ https://"+str(host)+":"+str(port))
-    conn=ConnectSC(DEBUG, username, password, host, port)
-
-if conn == False:
-    print("There was a problem connecting.")
-    exit(-1)
+#A list of traceroute data.  Each element is a dict, and each dict element contains an index, the source and destination (IPv4Address or IPv6Address),
+# and a list of the hops (IPv4Address or IPv6Address, or None when something didn't respond.)
+tenabledata['traceroutes'] = []
 
 
+if offlinefile == None:
+    if accesskey != "" and secretkey != "":
+        print("Connecting to cloud.tenable.com with access key", accesskey, "to report on assets")
+        try:
+            if args.host[0] != "":
+                host = args.host[0]
+        except:
+            host = "cloud.tenable.com"
+        conn = ConnectIO(DEBUG, accesskey, secretkey, host, port)
+    elif username != "" and password != "":
+        try:
+            if args.host[0] != "":
+                host = args.host[0]
+        except:
+            host = "127.0.0.1"
+        print("Connecting to SecurityCenter with username " + str(username) + " @ https://" + str(host) + ":" + str(port))
+        conn = ConnectSC(DEBUG, username, password, host, port)
 
-GatherInfo(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners)
-AnalyzeRouters(DEBUG,conn,subnets,gateways,routes,ipaddresses,assets,scanners,routers)
-CreateSubnetSummary(DEBUG, subnets, gateways, routes, ipaddresses,assets)
+    if conn == False:
+        print("There was a problem connecting.")
+        exit(-1)
+    GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC)
+else:
+    tenabledata=ParseOfflineFile(DEBUG,offlinefile)
 
-CreateMapPlot(DEBUG, subnets, gateways, routes, ipaddresses,assets,routers)
-CreateMapPlotRouters(DEBUG, subnets, gateways, routes, ipaddresses,assets,routers)
+AnalyzeFreeAddresses(DEBUG,tenabledata)
+
+AnalyzeRouters(DEBUG,tenabledata)
+CreateSubnetSummary(DEBUG, tenabledata)
+
+CreateMapPlot(DEBUG, tenabledata)
+CreateMapPlotRouters(DEBUG, tenabledata)
+
 exit(0)
 
 
