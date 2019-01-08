@@ -27,6 +27,7 @@
 #       - Class B subnets (internal)
 #       - Class C subnets  (internal)
 #  Summary data on each plot, such as the number of subnets, number of gateways, number of scanners, etc
+#  Query for all Nessus sensors, including scanners, network monitors, and agent managers, and plot
 #
 # Example usage with environment variables:
 # TIO_ACCESS_KEY=""; export TIO_ACCESS_KEY
@@ -54,6 +55,9 @@ from tenable.sc import TenableSC
 import argparse
 import re
 import ipaddress
+from datetime import timedelta
+from datetime import datetime
+
 
 #Testing
 #pip install plotly networkx
@@ -63,10 +67,15 @@ import plotly.graph_objs as go
 import networkx as nx
 
 
-def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
+def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
     TIO=False
     if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
         TIO=True
+
+    if age != None:
+        maximumage=datetime.today()-timedelta(days=int(age))
+    else:
+        maximumage=datetime(1970,1,1,0,0,0)
 
 
     if TIO:
@@ -78,49 +87,64 @@ def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
                 print("Asset ID:",asset['id'])
                 print("Asset IPv4 addresses:", asset['ipv4']) if 'ipv4' in asset else print("")
                 print("Asset info:",asset)
-            if 'ipv4' in asset:
+            if datetime.strptime(asset['last_seen'],"%Y-%m-%dT%H:%M:%S.%fZ") >= maximumage:
                 if DEBUG:
-                    if len(asset['ipv4']) > 1:
-                        print("This is a multi-homed asset")
-                IPV4=True
-                for i in asset['ipv4']:
-                    ip=ipaddress.IPv4Address(i)
-                    if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
-                        if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
-                            tenabledata['ipaddresses'].append(ipaddress.IPv4Address(i))
-            if 'ipv6' in asset:
-                if DEBUG:
-                    if len(asset['ipv6']) > 1:
-                        print("This is a multi-homed asset")
-                IPV6=True
-                for i in asset['ipv6']:
-                    ip=ipaddress.IPv6Address(i)
-                    if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
-                        if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
-                            tenabledata['ipaddresses'].append(ipaddress.IPv6Address(i))
-            if IPV4 and IPV6:
-                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']+asset['ipv6']]))
-            elif IPV4 and not IPV6:
-                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']]))
-            elif IPV6 and not IPV4:
-                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv6']]))
+                    print("This asset has been seen since",maximumage,"so adding it")
+                if 'ipv4' in asset:
+                    if DEBUG:
+                        if len(asset['ipv4']) > 1:
+                            print("This is a multi-homed asset")
+                    IPV4=True
+                    for i in asset['ipv4']:
+                        ip=ipaddress.IPv4Address(i)
+                        if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                            if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
+                                tenabledata['ipaddresses'].append(ipaddress.IPv4Address(i))
+                if 'ipv6' in asset:
+                    if DEBUG:
+                        if len(asset['ipv6']) > 1:
+                            print("This is a multi-homed asset")
+                    IPV6=True
+                    for i in asset['ipv6']:
+                        ip=ipaddress.IPv6Address(i)
+                        if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                            if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
+                                tenabledata['ipaddresses'].append(ipaddress.IPv6Address(i))
+                if IPV4 and IPV6:
+                    tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']+asset['ipv6']]))
+                elif IPV4 and not IPV6:
+                    tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']]))
+                elif IPV6 and not IPV4:
+                    tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv6']]))
+                else:
+                    if DEBUG:
+                        print("This asset had no IP addresses.  Weird, right?!")
             else:
                 if DEBUG:
-                    print("This asset had no IP addresses.  Weird, right?!")
+                    print("This asset has not been seen since",maximumage,"so not adding it")
     else:
         try:
-            assets = sc.analysis.vulns(tool="sumip")
-
+            if age == None:
+                assets = conn.analysis.vulns(tool="sumip")
+            else:
+                if int(age) < 1000:
+                    assets = conn.analysis.vulns(('lastSeen','=','00:'+str(int(age))),tool="sumip")
+                else:
+                    assets = conn.analysis.vulns(tool="sumip")
         except:
             assets = []
             print("Error getting ip list", sys.exc_info()[0], sys.exc_info()[1])
 
+        assetcount=0
         for asset in assets:
+            assetcount+=1
             if DEBUG:
                 print("Asset info:", asset)
             if 'ip' in asset:
                 tenabledata['ipaddresses'].append(ipaddress.IPv4Address(asset['ip']))
                 tenabledata['assets'].append(tuple([len(tenabledata['assets']),None,asset['ip']]))
+        if DEBUG:
+            print("Total assets retrieved from tenable.sc:",assetcount)
 
 
     if DEBUG:
@@ -285,7 +309,7 @@ def MergeRoutes(orig,newnet,newgw):
 
 
 #Gathers subnet info from either SecurityCenter or Tenable.io from Plugin 24272
-def GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
+def GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
     if DEBUG:
         print("Parsing information from all plugin ID 24272")
 
@@ -295,9 +319,13 @@ def GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
 
     try:
         if TIO:
-            results=conn.workbenches.vuln_outputs(24272)
+            results=conn.workbenches.vuln_outputs(24272,age=age)
         else:
-            results = conn.analysis.vulns(('pluginID', '=', '24272'), tool="vulndetails")
+            if age == None:
+                results = conn.analysis.vulns(('pluginID', '=', '24272'), tool="vulndetails")
+            else:
+                results = conn.analysis.vulns(('pluginID', '=', '24272'),('lastSeen', '=', '00:' + str(age)), tool="vulndetails")
+
     except:
         results=[]
         print("Error getting output from 24272", sys.exc_info()[0], sys.exc_info()[1])
@@ -373,7 +401,7 @@ def ParsePlugin24272(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
 
 
 #Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10663
-def GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
+def GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
     if DEBUG:
         print("Parsing information from all plugin ID 10663")
 
@@ -384,9 +412,12 @@ def GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
 
     try:
         if TIO:
-            results=conn.workbenches.vuln_outputs(10663)
+            results=conn.workbenches.vuln_outputs(10663,age=age)
         else:
-            results = conn.analysis.vulns(('pluginID', '=', '10663'), tool="vulndetails")
+            if age == None:
+                results = conn.analysis.vulns(('pluginID', '=', '10663'), tool="vulndetails")
+            else:
+                results = conn.analysis.vulns(('pluginID', '=', '10663'),('lastSeen', '=', '00:' + str(age)), tool="vulndetails")
     except:
         results=[]
         print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
@@ -444,7 +475,7 @@ def ParsePlugin10663(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
 
 
 #Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10287
-def GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
+def GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
     if DEBUG:
         print("Parsing information from all plugin ID 10287")
 
@@ -455,9 +486,12 @@ def GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC):
 
     try:
         if TIO:
-            results=conn.workbenches.vuln_outputs(10287)
+            results=conn.workbenches.vuln_outputs(10287,age=age)
         else:
-            results = conn.analysis.vulns(('pluginID', '=', '10287'), tool="vulndetails")
+            if age == None:
+                results = conn.analysis.vulns(('pluginID', '=', '10287'), tool="vulndetails")
+            else:
+                results = conn.analysis.vulns(('pluginID', '=', '10287'),('lastSeen', '=', '00:' + str(age)), tool="vulndetails")
     except:
         results=[]
         print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
@@ -712,72 +746,36 @@ def AnalyzeRouters(DEBUG,tenabledata):
                 if DEBUG:
                     print("This subnet already exists in a router entry, so not adding")
 
-    return(tenabledata['gateways'])
-
-# Assume that if a subnet is "Hop Count: 2" then the subnet of the scanner and the subnet of the host is separated
-# by only one router, so that router can be identified.
-# TODO: This should not just be about matching subnets, but also adding in single entries for gateways and subnets that might not be directly connected
-def ParsePlugin10287ForRouters(DEBUG,text,gwsubnetlist,tenabledata):
-    if DEBUG:
-        print("Determining which subnets share routers from Plugin 10287 output:", text)
+    return(tenabledata)
 
 
-    for (scanner, endhost) in re.findall("For your information, here is the traceroute from (.*) to (.*) :", text, flags=re.IGNORECASE):
-        if DEBUG:
-            print("The scanner IP address is: \"" + str(scanner) + "\"")
+#If there is Tenable asset data that matches one or more IP addresses on a router,
+# then we can use that asset data to fill in information on any additional interfaces that we don't know about
+def MatchRoutersToAssets(DEBUG,tenabledata):
+    # A list of assets found.  Each element is a tuple with an index, an asset ID, and a list of  IPv4Address and IPv6Address objects.
+    #tenabledata['assets'] = []
 
-    # Break up the plugin into individual lines
-    lines = re.split("\n", text)
-    lastline = len(lines)
-    if DEBUG:
-        print("Hop count line: ", lines[lastline - 2])
+    # A list of routing devices.  Each element is a tuple with an index, a list of gateways (IPv4Address and IPv6Address objects),
+    #  and a list of subnets  (IPv4Networks and IPv6Networks objects).
+    # This should all be calculated from the data from Tenable.
+    #tenabledata['routers'] = []
 
-    try:
-        (x, hopcount) = lines[lastline - 2].split(":", 2)
-    except:
-        x = re.findall("(\?|[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", text, flags=re.IGNORECASE)
-        hopcount=len(x)-1
-
-    hopcount = int(hopcount)
-    if DEBUG:
-        print("Hop count:")
-
-    if hopcount == 2:
-        if DEBUG:
-            print("This router shares two subnets:", lines[lastline - 5])
-            print("Match this scanner and endhost to the gwsubnetlist:", scanner, endhost)
-
-        entry1=None
-        entry2=None
-        #Find a match with the scanner
-        for i in gwsubnetlist:
-            (gw,subnet)=i
-            #We only care if the entry has both a gateway and subnet, otherwise we cannot do anything with it for now.
-            if gw != None and subnet != None:
-                if subnet.overlaps(ipaddress.ip_network(str(scanner) + "/32")):
-                    #We found the gwsubnetlist entry for the scanner, so save it and find the matching entry for the endhost
-                    entry1=i
-        # Find a match with the endhost
-        for i in gwsubnetlist:
-            (gw, subnet) = i
-            # We only care if the entry has both a gateway and subnet, otherwise we cannot do anything with it for now.
-            if gw != None and subnet != None:
-                if subnet.overlaps(ipaddress.ip_network(str(endhost) + "/32")):
-                    # We found the gwsubnetlist entry for the endhost
-                    entry2 = i
-        if entry1 != None and entry2 != None:
-            if DEBUG:
-                print("These two subnets share a router:",entry1, entry2)
-                try:
-                    tenabledata['routers'] = MergeRouters(DEBUG, tenabledata['routers'], entry1, entry2)
-                except:
-                    if DEBUG:
-                        print("Not a valid next hop: \"" + str(lines[i]) + "\"")
+    #Go through all routers
+    for (index,gateways,subnets) in tenabledata['routers']:
+        #For each router, pull out the individual IP addresses
+        for i in gateways:
+            #Check if the IP address matches any one of the asset IP addresses.
+            for (index,id,ipaddresses) in tenabledata['assets']:
+                for j in ipaddresses:
+                    if i == j:
+                        if DEBUG:
+                            print("Matched the router with the IP",gateways,"to asset ID",id)
 
 
 
 
     return(tenabledata)
+
 
 
 def SetJSONDefault(obj):
@@ -883,20 +881,20 @@ def ParseOfflineFile(DEBUG,offlinefile):
 
     return(tenabledata)
 
-def GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC):
+def GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC,age):
     print("Starting information gathering.")
 
-    tenabledata=DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
+    tenabledata=DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
 
     #Gather interface enumeration
-    tenabledata=GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
+    tenabledata=GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
 
     #Gather info from DHCP
-    tenabledata=GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
+    tenabledata=GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
 
     #Gather traceroute info.
     # This should also provide the information on a Nessus scanner itself, since the first IP will be the scanner.
-    tenabledata=GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC)
+    tenabledata=GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
 
 
     # 10551 gives some clues to interfaces via SNMP.  This could potentially be used to make a routing map
@@ -973,32 +971,54 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
     return(tio)
 
 
-def CreateMapPlotRouters(DEBUG,tenabledata):
+def CreateMapPlotRouters(DEBUG,tenabledata,age):
     # build a blank graph
     G = nx.Graph()
     y=1
     x=0.1
     subnetyoffset=0.7
 
+
     data = []
     layout = {
         'xaxis': {
-            'range': [0, 20],
+            'range': [0, len(tenabledata['routers'])],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
         'showlegend': False,
         'yaxis': {
-            'range': [0, 20],
+            'range': [0, len(tenabledata['routers'])],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
-        'width': 3200,
-        'height': 3200,
-        'shapes': []
+        'width': 160*len(tenabledata['routers']),
+        'height': 160*len(tenabledata['routers']),
+        'shapes': [],
+        'title': '<br>Network Diagram<br>Showing assets seen in the last '+str(age)+' days<br>',
+        'titlefont': dict(size=16),
+        'hovermode': 'closest',
+        'margin': dict(b=20, l=5, r=5, t=40),
+        'annotations': [dict(
+            text="Total IP addresses analyzed: "+str(len(tenabledata['ipaddresses'])),
+            showarrow=False,
+            yref="paper",
+            x=(len(tenabledata['routers'])/2), y=0.002),
+            dict(
+                text="Generated by <a href='https://github.com/cybersmithio/networkmapper'> networkmapper.py</a>",
+                showarrow=False,
+                xref="paper", yref="paper",
+                x=0.005, y=-0.002)
+        ],
     }
+
+
+    if DEBUG:
+        print("Plot layout height:",layout['height'])
+        print("Plot layout width:",layout['width'])
+
 
     #Go through all the routers and put a node on the graph
     for (index,gwlist,snlist) in tenabledata['routers']:
@@ -1055,8 +1075,9 @@ def CreateMapPlotRouters(DEBUG,tenabledata):
 
 
 
-    fig = go.Figure(data=data,
-                    layout=layout)
+    fig = go.Figure(data=data,layout=layout)
+
+
 
     # Open the graph in a browser window
     plotly.offline.plot(fig, auto_open=True)
@@ -1073,7 +1094,7 @@ def CreateMapPlotRouters(DEBUG,tenabledata):
 #
 # The nodes are drawn separate from the connectors.
 #
-def CreateMapPlot(DEBUG,tenabledata):
+def CreateMapPlot(DEBUG,tenabledata,age):
     # build a blank graph
     G = nx.Graph()
 
@@ -1084,21 +1105,30 @@ def CreateMapPlot(DEBUG,tenabledata):
     data = []
     layout = {
         'xaxis': {
-            'range': [0, 20],
+            'range': [0, len(tenabledata['routers'])],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
         'showlegend': False,
         'yaxis': {
-            'range': [0, 20],
+            'range': [0, len(tenabledata['routers'])],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
-        'width': 3200,
-        'height': 3200,
-        'shapes': []
+        'width': 160*len(tenabledata['routers']),
+        'height': 160*len(tenabledata['routers']),
+        'shapes': [],
+        'title': '<br>Network Diagram<br>Showing assets seen in the last '+str(age)+' days<br>Total IP addresses analyzed: '+str(len(tenabledata['ipaddresses'])),
+        'titlefont': dict(size=16),
+        'hovermode': 'closest',
+        'margin': dict(b=20, l=5, r=5, t=40),
+        'annotations': [dict(
+            text="Generated by <a href='https://github.com/cybersmithio/networkmapper'> networkmapper.py</a>",
+            showarrow=False,
+            xref="paper", yref="paper",
+            x=0.005, y=-0.002)],
     }
 
     #Go through all the subnets and put a node on the graph
@@ -1148,8 +1178,6 @@ def CreateMapPlot(DEBUG,tenabledata):
     #layout['xaxis']['range']=[0,y+3]
     #layout['height']=y*100
     #layout['width']=y*100
-
-
 
     fig = go.Figure(data=data,
                     layout=layout)
@@ -1541,8 +1569,23 @@ def PlotSubnetShape(DEBUG,x,y,text):
     data=[trace0]
     return(data,shape)
 
+#The bottom left corner of the subnet will be at the x and y coordinates supplied
+def PlotText(DEBUG,x,y,text):
 
-def CreateSubnetSummary(DEBUG, tenabledata):
+    trace0 = go.Scatter(
+        x=[x],
+        y=[y],
+        text=[str(text)],
+        mode='text',
+        textposition='top right',
+        hoverinfo = 'none',
+    )
+
+    data=[trace0]
+    return(data)
+
+
+def CreateSubnetSummary(DEBUG, tenabledata,age):
     connectorthickness = 0.5
     connectorcolor = '#000'
     nodesize = 10
@@ -1740,6 +1783,7 @@ parser.add_argument('--testpattern',help="Draw a test pattern",action="store_tru
 parser.add_argument('--outputfile',help="A file to dump all the raw data into, for debugging or offline use.",nargs=1,action="store")
 parser.add_argument('--offlinefile',help="A file from a previous run of the networkmapper, which can be used to generate a map offline.",nargs=1,action="store")
 parser.add_argument('--excludepublic',help="Do not include public IPv4 ranges when mapping",action="store_true")
+parser.add_argument('--age',help="The maximum age in days of the Tenable data to use.",nargs=1,action="store")
 
 args=parser.parse_args()
 
@@ -1808,6 +1852,13 @@ try:
 except:
     port = "443"
 
+try:
+    if args.age[0] != "":
+        age = args.age[0]
+except:
+    age = None
+
+
 
 outputfile = None
 try:
@@ -1873,17 +1924,20 @@ if offlinefile == None:
     if conn == False:
         print("There was a problem connecting.")
         exit(-1)
-    GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC)
+    tenabledata=GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC,age)
 else:
     tenabledata=ParseOfflineFile(DEBUG,offlinefile)
 
-AnalyzeFreeAddresses(DEBUG,tenabledata)
 
-AnalyzeRouters(DEBUG,tenabledata)
-CreateSubnetSummary(DEBUG, tenabledata)
+tenabledata=AnalyzeFreeAddresses(DEBUG,tenabledata)
 
-CreateMapPlot(DEBUG, tenabledata)
-CreateMapPlotRouters(DEBUG, tenabledata)
+tenabledata=AnalyzeRouters(DEBUG,tenabledata)
+
+tenabledata=MatchRoutersToAssets(DEBUG,tenabledata)
+
+CreateSubnetSummary(DEBUG, tenabledata,age)
+CreateMapPlot(DEBUG, tenabledata,age)
+CreateMapPlotRouters(DEBUG, tenabledata,age)
 
 exit(0)
 
