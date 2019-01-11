@@ -5,6 +5,15 @@
 # Takes data from Tenable.io or Tenable.sc and makes a network map.
 # Written by: James Smith
 #
+# Version 5:
+#   * Improved subnet plot to show a summary count of the netmasks
+#   * Host count in subnet label
+#   * Use data of only a certain age
+#
+# Version 4:
+#   * Added count of subnets by netmask on the "Subnet Overview" page
+#   * updated visuals
+#
 # Version 3:
 #   * Revamped the variable structure, since it was getting to be a dog's breakfast.
 #   * Added CLI flag to exclude public hosts and subnets from map.
@@ -18,9 +27,7 @@
 #     This file can be used as a source of data in an offline mode, and can be
 #     useful for debugging.
 #
-#   Host count in subnet label
 #   Show router interconnections (if they exist)
-#   Just use data of a certain age
 #   A mode that outputs a visio macro file for drawing the diagram in visio
 #   A list on the subnet page we had 3 lists/tables:
 #       - Non RFC-1918 addresses scanned (public IPs, or subnets of public IPs)
@@ -83,6 +90,8 @@ def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
         for asset in conn.assets.list():
             IPV4=False
             IPv6=False
+            #We need to build a list of addresses so we can filter out things like link-local addresses
+            ipaddresses=[]
             if DEBUG:
                 print("Asset ID:",asset['id'])
                 print("Asset IPv4 addresses:", asset['ipv4']) if 'ipv4' in asset else print("")
@@ -97,9 +106,10 @@ def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
                     IPV4=True
                     for i in asset['ipv4']:
                         ip=ipaddress.IPv4Address(i)
-                        if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                        if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast and not ip.is_unspecified:
                             if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
-                                tenabledata['ipaddresses'].append(ipaddress.IPv4Address(i))
+                                tenabledata['ipaddresses'].append(ip)
+                                ipaddresses.append(ip)
                 if 'ipv6' in asset:
                     if DEBUG:
                         if len(asset['ipv6']) > 1:
@@ -107,18 +117,11 @@ def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
                     IPV6=True
                     for i in asset['ipv6']:
                         ip=ipaddress.IPv6Address(i)
-                        if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                        if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast and not ip.is_unspecified:
                             if EXCLUDEPUBLIC == False or ( EXCLUDEPUBLIC ==True and ip.is_private):
                                 tenabledata['ipaddresses'].append(ipaddress.IPv6Address(i))
-                if IPV4 and IPV6:
-                    tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']+asset['ipv6']]))
-                elif IPV4 and not IPV6:
-                    tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv4']]))
-                elif IPV6 and not IPV4:
-                    tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],asset['ipv6']]))
-                else:
-                    if DEBUG:
-                        print("This asset had no IP addresses.  Weird, right?!")
+                                ipaddresses.append(ip)
+                tenabledata['assets'].append(tuple([len(tenabledata['assets']),asset['id'],ipaddresses]))
             else:
                 if DEBUG:
                     print("This asset has not been seen since",maximumage,"so not adding it")
@@ -156,6 +159,41 @@ def DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
     return(tenabledata)
 
 
+def DownloadScanners(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
+    TIO=False
+    if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
+        TIO=True
+
+    if age != None:
+        maximumage=datetime.today()-timedelta(days=int(age))
+    else:
+        maximumage=datetime(1970,1,1,0,0,0)
+
+    if TIO:
+        #Go through each asset downloaded from Tenable.io, parse the data and store it.
+
+        # A list of scanners found. Each element is a tuple with an index, the type of scanner, and the IPv4Address or IPv6Address object representing the IP address.
+
+        for scanners in conn.scanners.list():
+            if DEBUG:
+                print("Scanner info:",scanners)
+                #last_connect
+                #type: "managed"= Nessus scanner, "managed_pvs"= NNM
+            #So the scanner list does not return IP addresses.  There would need to be a way to match the scanner from this list to the scan data.
+            #possible variables include 'id', 'key','name', 'uuid','remote_uuid',
+            #tenabledata['scanners'] = MergeScanners(tenabledata['scanners'], ipaddress.IPv4Address(scanner))
+
+
+
+    if DEBUG:
+        print("\n\n\n")
+        print("Scanners found:",tenabledata['scanners'])
+        print("\n\n\n")
+
+    exit()
+
+
+
 #Takes the subnets and merges them, ensuring no duplicates between the two
 #The orig should be a list of subnets (i.e. IPv4Network types)
 #the new should be an IPv4Network type
@@ -175,20 +213,38 @@ def MergeSubnets(orig,new):
 
 
 
-#Takes the scanner and merges it to the existing scanner list, ensuring no duplicates between the two
+#Takes the scanner and merges it to the existing Nessus scanner list, ensuring no duplicates between the two
 #The orig should be a list of scanners (i.e. IPv4Addres types)
 #the new should be an IPv4Address or IPv6Address type
 def MergeScanners(orig,new):
 
     FOUND=False
     for i in orig:
-        (index,scanner)=i
+        (index,sensortype,scanner)=i
         if scanner == new:
             FOUND=True
 
     #If we didn't find a match, then add it to the orig
     if FOUND == False:
-        orig.append(tuple([len(orig), new]))
+        orig.append(tuple([len(orig), "scanner",new]))
+
+    return(orig)
+
+#Takes the scanner and merges it to the existing Nessus Network Monitor list, ensuring no duplicates between the two
+#The orig should be a list of scanners (i.e. IPv4Addres types)
+#the new should be the endpoint host that was detected by a Nessus Network Monitor.
+#    Since we don't care about the IP address of the Network Monitor, we just care about which subnets it's monitoring.
+def MergeNetworkMonitor(orig,new):
+
+    FOUND=False
+    for i in orig:
+        (index,sensortype,endpoint)=i
+        if endpoint == new:
+            FOUND=True
+
+    #If we didn't find a match, then add it to the orig
+    if FOUND == False:
+        orig.append(tuple([len(orig), "monitor",new]))
 
     return(orig)
 
@@ -319,13 +375,12 @@ def GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
 
     try:
         if TIO:
-            results=conn.workbenches.vuln_outputs(24272,age=age)
+            results=conn.workbenches.vuln_outputs(24272,age=int(age))
         else:
             if age == None:
                 results = conn.analysis.vulns(('pluginID', '=', '24272'), tool="vulndetails")
             else:
                 results = conn.analysis.vulns(('pluginID', '=', '24272'),('lastSeen', '=', '00:' + str(age)), tool="vulndetails")
-
     except:
         results=[]
         print("Error getting output from 24272", sys.exc_info()[0], sys.exc_info()[1])
@@ -352,6 +407,7 @@ def GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
 
 #Takes the text which should be from a Plugin Output for Plugin ID 24272, and parses it.
 #Merges the data with the existing subnets, gateways, and routes lists, and then returns those.
+#Make sure we do not include anything from 169.254.0.0/16
 def ParsePlugin24272(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
     if DEBUG:
         print("Parsing plugin text from 24272",text)
@@ -378,10 +434,10 @@ def ParsePlugin24272(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
             print("Netmask:",netmask)
             print("Gateway:",gw,"\n")
         n1 = ipaddress.ip_network(subnet+"/"+netmask,strict=False)
-        if (not n1.is_multicast)  and (not n1.is_loopback) and (not n1.is_reserved) and (netmask != "255.255.255.255"):
+        if (not n1.is_multicast)  and (not n1.is_loopback) and (not n1.is_reserved) and (not n1.is_link_local) and (netmask != "255.255.255.255"):
             #Only save the route and subnet info if this is not a multicast, loopback, reserved,  or host
             if DEBUG:
-                print("Saving subnet:")
+                print("Saving subnet:",subnet)
             if n1 != defaultroute:
                 if EXCLUDEPUBLIC == False or (EXCLUDEPUBLIC == True and n1.is_private ):
                     tenabledata['subnets'] = MergeSubnets(tenabledata['subnets'], n1)
@@ -391,7 +447,7 @@ def ParsePlugin24272(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
                 tenabledata['routes'] = MergeRoutes(tenabledata['routes'], n1,ipaddress.IPv4Address(gw))
 
     if DEBUG:
-        print("Summary of information collected")
+        print("Summary of information collected after parsing output from 24272")
         print("Subnets:",tenabledata['subnets'])
         print("Gateways:",tenabledata['gateways'])
         print("Routes:",tenabledata['routes'])
@@ -412,7 +468,7 @@ def GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
 
     try:
         if TIO:
-            results=conn.workbenches.vuln_outputs(10663,age=age)
+            results=conn.workbenches.vuln_outputs(10663,age=int(age))
         else:
             if age == None:
                 results = conn.analysis.vulns(('pluginID', '=', '10663'), tool="vulndetails")
@@ -486,7 +542,7 @@ def GetPlugin10287(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
 
     try:
         if TIO:
-            results=conn.workbenches.vuln_outputs(10287,age=age)
+            results=conn.workbenches.vuln_outputs(10287,age=int(age))
         else:
             if age == None:
                 results = conn.analysis.vulns(('pluginID', '=', '10287'), tool="vulndetails")
@@ -640,6 +696,81 @@ def ParsePlugin10287(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
     return(tenabledata)
 
 
+
+#Gathers subnet info from SecurityCenter or Tenable.io from Plugin 10287
+def GetPlugin12(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age):
+    if DEBUG:
+        print("Parsing information from all plugin ID 12")
+
+    #Assume we're using a SecurityCenter connection unless we know the connection is for Tenable.io
+    TIO=False
+    if str(type(conn))  == "<class 'tenable.io.TenableIO'>":
+        TIO=True
+
+    try:
+        if TIO:
+            results=conn.workbenches.vuln_outputs(12,age=int(age))
+        else:
+            if age == None:
+                results = conn.analysis.vulns(('pluginID', '=', '12'), tool="vulndetails")
+            else:
+                results = conn.analysis.vulns(('pluginID', '=', '12'),('lastSeen', '=', '00:' + str(age)), tool="vulndetails")
+    except:
+        results=[]
+        print("Error getting plugin info", sys.exc_info()[0], sys.exc_info()[1])
+
+    for i in results:
+        if DEBUG:
+            print("Result info:",i)
+        if TIO:
+            tenabledata = ParsePlugin12(DEBUG, i['plugin_output'], tenabledata,EXCLUDEPUBLIC)
+        else:
+            tenabledata=ParsePlugin12(DEBUG,i['pluginText'],tenabledata,EXCLUDEPUBLIC)
+
+    if DEBUG:
+        print("Summary of information collected from  Plugin 12\n")
+        for i in tenabledata:
+            print(i)
+            print(tenabledata[i],"\n")
+
+    return(tenabledata)
+
+
+
+#Takes the text which should be from a Plugin Output for Plugin ID 12, and parses it.
+#Merges the data with the existing Nessus Network Monitors
+#TODO: Make this work with IPv6 as well
+def ParsePlugin12(DEBUG,text,tenabledata,EXCLUDEPUBLIC):
+    if DEBUG:
+        print("Parsing plugin text from 12\n",text)
+
+    lines=re.split("\n",text)
+    if DEBUG:
+        print("Total lines found:",len(lines))
+    for i in range(0,len(lines)):
+        #We only care about finding NNMs that are 0 hops away from the target, otherwise we don't know which subnet the NNM is on
+        for (endhost) in re.findall("The remote host (.*) is 0 hops away from a NNM sensor", lines[i], flags=re.IGNORECASE):
+            if DEBUG:
+                print("NNM found \"" + str(endhost) + "\"")
+            try:
+                ip=ipaddress.IPv4Address(endhost)
+            except:
+                ip = ipaddress.IPv6Address(endhost)
+
+            if not ip.is_link_local and not ip.is_loopback and not ip.is_reserved and not ip.is_multicast:
+                if EXCLUDEPUBLIC == False or (EXCLUDEPUBLIC == True and ip.is_private):
+                    tenabledata['scanners'] = MergeNetworkMonitor(tenabledata['scanners'], ip)
+
+    if DEBUG:
+        print("Summary of endpoints detected by NNM found by Plugin 12")
+        print("Scanners:",tenabledata['scanners'])
+        print("\n\n\n")
+
+    return(tenabledata)
+
+
+
+
 def AnalyzeRouters(DEBUG,tenabledata):
     if DEBUG:
         print("Reviewing plugin ID 10287 along with subnets and gateways to determine routers")
@@ -714,11 +845,11 @@ def AnalyzeRouters(DEBUG,tenabledata):
             if entry1 != None and entry2 != None:
                 if DEBUG:
                     print("These two subnets share a router:", entry1, entry2)
-                    try:
-                        tenabledata['routers'] = MergeRouters(DEBUG, tenabledata['routers'], entry1, entry2)
-                    except:
-                        if DEBUG:
-                            print("Not a valid next hop: \"" + str(lines[i]) + "\"")
+                try:
+                    tenabledata['routers'] = MergeRouters(DEBUG, tenabledata['routers'], entry1, entry2)
+                except:
+                    if DEBUG:
+                        print("Not a valid next hop: \"" + str(lines[i]) + "\"")
 
     if DEBUG:
         print("Here are the routers:",tenabledata['routers'])
@@ -868,11 +999,11 @@ def ParseOfflineFile(DEBUG,offlinefile):
 
     x = []
     for i in tenabledata['scanners']:
-        (a, b) = i
+        (a,b,c) = i
         try:
-            x.append(tuple([a,ipaddress.IPv4Address(b)]))
+            x.append(tuple([a,b,ipaddress.IPv4Address(c)]))
         except:
-            x.append(tuple([a,ipaddress.IPv6Address(b)]))
+            x.append(tuple([a,b,ipaddress.IPv6Address(c)]))
     tenabledata['scanners']=x
 
     outfp=open("test.txt","w")
@@ -886,8 +1017,14 @@ def GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC,age):
 
     tenabledata=DownloadAssetInfoIO(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
 
+    #tenabledata=DownloadScanners(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
+
+
     #Gather interface enumeration
     tenabledata=GetPlugin24272(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
+
+    #Gather information on NNM detections
+    tenabledata=GetPlugin12(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
 
     #Gather info from DHCP
     tenabledata=GetPlugin10663(DEBUG,conn,tenabledata,EXCLUDEPUBLIC,age)
@@ -902,7 +1039,7 @@ def GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC,age):
     #92370 shows ARP tables, so important for matching MAC addresses to IP addresses.
 
 
-    #Plugin ID 132 can sometimes provide information about other IP or MAC addresses on the system.
+    #Plugin ID 12 can sometimes provide information about other IP or MAC addresses on the system.
     # (i.e. 192.168.15.1 belongs to 192.168.16.1 because this plugin says so, and the hostname is the same)
 
     #Need a plugin to get subnet data from Windows and Linux
@@ -970,8 +1107,25 @@ def ConnectIO(DEBUG,accesskey,secretkey,host,port):
 
     return(tio)
 
+#subnet should be an IPv4Network or IPv6Network object
+def CalculateHostsInSubnet(DEBUG,subnet,tenabledata):
+    ipcount=0
+    for i in tenabledata['ipaddresses']:
+        if isinstance(i,ipaddress.IPv4Address):
+            if subnet.overlaps(ipaddress.IPv4Network(str(i)+"/32")):
+                if DEBUG:
+                    print("IP addresss",i,"is part of subnet",subnet,"so adding to count")
+                ipcount+=1
+        elif isinstance(i,ipaddress.IPv6Address):
+            if subnet.overlaps(ipaddress.IPv6Network(str(i)+"/128")):
+                if DEBUG:
+                    print("IP addresss",i,"is part of subnet",subnet,"so adding to count")
+                ipcount+=1
 
-def CreateMapPlotRouters(DEBUG,tenabledata,age):
+    return(ipcount)
+
+
+def CreateMapPlotRouters(DEBUG,tenabledata,age,IGNOREEMPTYSUBNETS):
     # build a blank graph
     G = nx.Graph()
     y=1
@@ -979,25 +1133,39 @@ def CreateMapPlotRouters(DEBUG,tenabledata,age):
     subnetyoffset=0.7
 
 
+    if len(tenabledata['routers']) >= 6:
+        graphwidth=160*len(tenabledata['routers'])/2
+        graphheight=160*len(tenabledata['routers'])
+        xrange=len(tenabledata['routers'])/2
+        yrange=len(tenabledata['routers'])
+    else:
+        graphwidth=480
+        graphheight=960
+        xrange=3
+        yrange=6
+
+    #Keep track of how far to the right we use the X-axis
+    maxxusage=3.2
+
     data = []
     layout = {
         'xaxis': {
-            'range': [0, len(tenabledata['routers'])],
+            'range': [0, xrange],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
         'showlegend': False,
         'yaxis': {
-            'range': [0, len(tenabledata['routers'])],
+            'range': [0, yrange],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
-        'width': 160*len(tenabledata['routers']),
-        'height': 160*len(tenabledata['routers']),
+        'width': graphwidth,
+        'height': graphheight,
         'shapes': [],
-        'title': '<br>Network Diagram<br>Showing assets seen in the last '+str(age)+' days<br>',
+        'title': '<br>Network Diagram',
         'titlefont': dict(size=16),
         'hovermode': 'closest',
         'margin': dict(b=20, l=5, r=5, t=40),
@@ -1005,7 +1173,7 @@ def CreateMapPlotRouters(DEBUG,tenabledata,age):
             text="Total IP addresses analyzed: "+str(len(tenabledata['ipaddresses'])),
             showarrow=False,
             yref="paper",
-            x=(len(tenabledata['routers'])/2), y=0.002),
+            x=xrange/2, y=0.002),
             dict(
                 text="Generated by <a href='https://github.com/cybersmithio/networkmapper'> networkmapper.py</a>",
                 showarrow=False,
@@ -1014,6 +1182,8 @@ def CreateMapPlotRouters(DEBUG,tenabledata,age):
         ],
     }
 
+    if age != None:
+        layout['title']=layout['title']+'<br>Showing assets seen in the last '+str(age)+' days<br>'
 
     if DEBUG:
         print("Plot layout height:",layout['height'])
@@ -1022,58 +1192,101 @@ def CreateMapPlotRouters(DEBUG,tenabledata,age):
 
     #Go through all the routers and put a node on the graph
     for (index,gwlist,snlist) in tenabledata['routers']:
-        #Plot the router and merge into the plot data
-        (text, shapeinfo) = PlotRouterShape(DEBUG, x, y, gwlist)
-        for i in shapeinfo:
-            layout['shapes'].append(i)
-        for i in text:
-            data.append(i)
+        subnetcount=0
 
         #Plot each subnet that will be attached to this router
         subnetx=x
         subnety=y
         for subnet in snlist:
-            #Draw the subnet
-            (text, shapeinfo) = PlotSubnetShape(DEBUG, subnetx + 1, subnety + 0.25, str(subnet))
+            #Set a flag if this subnet has an NNM
+            NNM=False
+
+            hostsinsubnet=CalculateHostsInSubnet(DEBUG,subnet,tenabledata)
+            if IGNOREEMPTYSUBNETS == False or (IGNOREEMPTYSUBNETS == True and hostsinsubnet > 0):
+                subnetcount+=1
+                #Draw the subnet
+                (text, shapeinfo) = PlotSubnetShape(DEBUG, subnetx + 1, subnety + 0.25, str(subnet)+"   IP addresses:"+str(hostsinsubnet))
+                for i in shapeinfo:
+                    layout['shapes'].append(i)
+                for i in text:
+                    data.append(i)
+
+                #Connect the subnet to the router
+                (shapeinfo) = DrawElbowConnector(DEBUG, subnetx + 1, subnety + 0.3, subnetx + 0.7, subnety + 0.3, subnetx + 0.7, y+0.3, x+0.5, y+0.3)
+
+                #(shapeinfo) = DrawStraightConnector(DEBUG, subnetx + 0.7, subnety + 0.3, x + 0.5, y + 0.3)
+                for i in shapeinfo:
+                    layout['shapes'].append(i)
+
+
+                #Try to attach any scanners to the subnet, so check all the scanners
+                scannercount=0
+                for(index,sensortype,ns) in tenabledata['scanners']:
+                    if sensortype == "scanner":
+                        #See if this gateway is in the current subnet, and if so, print the name
+                        if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
+                            if maxxusage < subnetx+3.1+(scannercount*0.7):
+                                maxxusage=subnetx+3.1+(scannercount*0.7)
+                            (text, shapeinfo) = PlotNessusScanner(DEBUG, subnetx+3.1+(scannercount*0.7), subnety-0.2, ns)
+                            for i in shapeinfo:
+                                layout['shapes'].append(i)
+                            for i in text:
+                                data.append(i)
+                            #Draw a connector from the scanner to the subnet
+                            #(shapeinfo) = DrawElbowConnector(DEBUG, subnetx+1.3, subnety+0.25, subnetx+1.3, subnety+0.15, subnetx+2.25+(scannercount*0.7), subnety+0.15,subnetx+2.25+(scannercount*0.7) , subnety+0.1)
+                            (shapeinfo) = DrawRightAngleConnector(DEBUG, subnetx+2.65, subnety+0.3, subnetx+3+(scannercount*0.7), subnety+0.3, subnetx+3+(scannercount*0.7) , subnety+0.22)
+                            for i in shapeinfo:
+                                layout['shapes'].append(i)
+
+                            scannercount+=1
+                    elif sensortype == "monitor" and NNM == False:
+                        if DEBUG:
+                            print("Checking if network monitor needs to be draw")
+                        if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
+                            if maxxusage < subnetx+3.1+(scannercount*0.7):
+                                maxxusage=subnetx+3.1+(scannercount*0.7)
+                            (text, shapeinfo) = PlotNessusNetworkMonitor(DEBUG, subnetx+3.1+(scannercount*0.7), subnety-0.2, "")
+                            for i in shapeinfo:
+                                layout['shapes'].append(i)
+                            for i in text:
+                                data.append(i)
+                            # Draw a connector from the scanner to the subnet
+                            # (shapeinfo) = DrawElbowConnector(DEBUG, subnetx+1.3, subnety+0.25, subnetx+1.3, subnety+0.15, subnetx+2.25+(scannercount*0.7), subnety+0.15,subnetx+2.25+(scannercount*0.7) , subnety+0.1)
+                            (shapeinfo) = DrawRightAngleConnector(DEBUG, subnetx + 2.65, subnety + 0.3, subnetx + 3 + (scannercount * 0.7), subnety + 0.3, subnetx + 3 + (scannercount * 0.7), subnety + 0.22)
+                            for i in shapeinfo:
+                                layout['shapes'].append(i)
+                            NNM=True
+                            scannercount += 1
+
+                subnety+=subnetyoffset
+        #See if there were any subnets for this router.
+        if subnetcount > 0:
+            #Plot the router and merge into the plot data
+            (text, shapeinfo) = PlotRouterShape(DEBUG, x, y, gwlist)
             for i in shapeinfo:
                 layout['shapes'].append(i)
             for i in text:
                 data.append(i)
-
-            #Connect the subnet to the router
-            (shapeinfo) = DrawElbowConnector(DEBUG, subnetx + 1, subnety + 0.3, subnetx + 0.7, subnety + 0.3, subnetx + 0.7, y+0.3, x+0.5, y+0.3)
-
-            #(shapeinfo) = DrawStraightConnector(DEBUG, subnetx + 0.7, subnety + 0.3, x + 0.5, y + 0.3)
-            for i in shapeinfo:
-                layout['shapes'].append(i)
+            y=y+(len(snlist)*subnetyoffset)
+        else:
+            if DEBUG:
+                print("Not putting this router on since it has no subnets to draw")
 
 
-            #Try to attach any scanners to the subnet, so check all the scanners
-            scannercount=0
-            for(index,ns) in tenabledata['scanners']:
-                #See if this gateway is in the current subnet, and if so, print the name
-                if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
-                    (text, shapeinfo) = PlotNessusScanner(DEBUG, subnetx+2.3+(scannercount*0.7), subnety-0.3, ns)
-                    for i in shapeinfo:
-                        layout['shapes'].append(i)
-                    for i in text:
-                        data.append(i)
-                    #Draw a connector from the scanner to the subnet
-                    (shapeinfo) = DrawElbowConnector(DEBUG, subnetx+1.3, subnety+0.25, subnetx+1.3, subnety+0.15, subnetx+2.5+(scannercount*0.7), subnety+0.15,subnetx+2.5+(scannercount*0.7) , subnety+0.1)
-                    for i in shapeinfo:
-                        layout['shapes'].append(i)
-
-                    scannercount+=1
-            subnety+=subnetyoffset
-        y=y+(len(snlist)*subnetyoffset)
-
-    #Scaling does not work well with the font sizes, so removing this for now
-    #layout['yaxis']['range']=[0,y+3]
-    #layout['xaxis']['range']=[0,y+3]
-    #layout['height']=y*100
-    #layout['width']=y*100
-
-
+    layout['xaxis'] = {
+        'range': [0, maxxusage+0.5],
+        'visible': False,
+        'showline': False,
+        'zeroline': True,
+    }
+    layout['yaxis'] =  {
+        'range': [0, y+1],
+        'visible': False,
+        'showline': False,
+        'zeroline': True,
+    }
+    layout['width']=(maxxusage+0.5)*160
+    layout['height']=(y+1)*160
 
     fig = go.Figure(data=data,layout=layout)
 
@@ -1101,24 +1314,36 @@ def CreateMapPlot(DEBUG,tenabledata,age):
     y=1
     x=0.1
     subnetyoffset=1
+    maxxusage=2
+
+    if len(tenabledata['routers']) >= 6:
+        graphwidth=160*len(tenabledata['routers'])/2
+        graphheight=160*len(tenabledata['routers'])
+        xrange=len(tenabledata['routers'])/2
+        yrange=len(tenabledata['routers'])
+    else:
+        graphwidth=480
+        graphheight=960
+        xrange=3
+        yrange=6
 
     data = []
     layout = {
         'xaxis': {
-            'range': [0, len(tenabledata['routers'])],
+            'range': [0, xrange],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
         'showlegend': False,
         'yaxis': {
-            'range': [0, len(tenabledata['routers'])],
+            'range': [0, yrange],
             'visible': False,
             'showline': False,
             'zeroline': True,
         },
-        'width': 160*len(tenabledata['routers']),
-        'height': 160*len(tenabledata['routers']),
+        'width': graphwidth,
+        'height': graphheight,
         'shapes': [],
         'title': '<br>Network Diagram<br>Showing assets seen in the last '+str(age)+' days<br>Total IP addresses analyzed: '+str(len(tenabledata['ipaddresses'])),
         'titlefont': dict(size=16),
@@ -1156,28 +1381,44 @@ def CreateMapPlot(DEBUG,tenabledata,age):
 
         #Try to attach any scanners to the subnet, so check all the scanners
         scannercount=0
-        for(index,ns) in tenabledata['scanners']:
-            #See if this gateway is in the current subnet, and if so, print the name
-            if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
-                (text, shapeinfo) = PlotNessusScanner(DEBUG, x+2+(scannercount*0.7), y-0.3, ns)
-                for i in shapeinfo:
-                    layout['shapes'].append(i)
-                for i in text:
-                    data.append(i)
-                #Draw a connector from the scanner to the subnet
-                (shapeinfo) = DrawElbowConnector(DEBUG, x+1, y+0.25, x+1, y+0.15, x+2.2+(scannercount*0.7), y+0.15,x+2.2+(scannercount*0.7) , y+0.1)
-                for i in shapeinfo:
-                    layout['shapes'].append(i)
+        for(index,sensortype,ns) in tenabledata['scanners']:
+            if sensortype == "scanner":
+                #See if this gateway is in the current subnet, and if so, print the name
+                if subnet.overlaps(ipaddress.ip_network(str(ns)+"/32")):
+                    if maxxusage < x+2+(scannercount*0.7):
+                        maxxusage = x+2+(scannercount*0.7)
+                    (text, shapeinfo) = PlotNessusScanner(DEBUG, x+2+(scannercount*0.7), y-0.3, ns)
+                    for i in shapeinfo:
+                        layout['shapes'].append(i)
+                    for i in text:
+                        data.append(i)
+                    #Draw a connector from the scanner to the subnet
+                    (shapeinfo) = DrawElbowConnector(DEBUG, x+1, y+0.25, x+1, y+0.15, x+2.2+(scannercount*0.7), y+0.15,x+2.2+(scannercount*0.7) , y+0.1)
+                    for i in shapeinfo:
+                        layout['shapes'].append(i)
 
-                scannercount+=1
+                    scannercount+=1
+            elif sensortype == "monitor":
+                if DEBUG:
+                    print("Checking if network monitor needs to be draw")
 
         y=y+subnetyoffset
 
-    #Scaling does not work well with the font sizes, so removing this for now
-    #layout['yaxis']['range']=[0,y+3]
-    #layout['xaxis']['range']=[0,y+3]
-    #layout['height']=y*100
-    #layout['width']=y*100
+    layout['xaxis'] = {
+        'range': [0, maxxusage+0.5],
+        'visible': False,
+        'showline': False,
+        'zeroline': True,
+    }
+    layout['yaxis'] =  {
+        'range': [0, y+1],
+        'visible': False,
+        'showline': False,
+        'zeroline': True,
+    }
+    layout['width']=(maxxusage+0.5)*160
+    layout['height']=(y+1)*160
+
 
     fig = go.Figure(data=data,
                     layout=layout)
@@ -1256,9 +1497,21 @@ def CreateTestPattern(DEBUG):
     for i in text:
         data.append(i)
 
+
+    (text,shapeinfo)=PlotNessusNetworkMonitor(DEBUG,3.5,3,"xxx.xxx.xxx.xxx")
+    for i in shapeinfo:
+        layout['shapes'].append(i)
+    for i in text:
+        data.append(i)
+
+
+
+
     (shapeinfo)=DrawElbowConnector(DEBUG, 1, 3, 1, 3.2, 2, 3.2, 2, 3.5)
     for i in shapeinfo:
         layout['shapes'].append(i)
+
+
 
 
     fig = go.Figure(data=data,
@@ -1289,6 +1542,7 @@ def PlotShapeCircle(DEBUG):
                 'y0': 1.0,
                 'x1': 1.1,
                 'y1': 1.1,
+                'layer': 'below',
                 'line': {
                     'color': 'rgba(50, 171, 96, 1)',
                 },
@@ -1364,6 +1618,39 @@ def DrawElbowConnector(DEBUG,x0,y0,x1,y1,x2,y2,x3,y3):
     ]
     return(shape)
 
+
+def DrawRightAngleConnector(DEBUG,x0,y0,x1,y1,x2,y2):
+    shape = [
+        {
+                'type': 'line',
+                'xref': 'x',
+                'yref': 'y',
+                'x0': x0,
+                'y0': y0,
+                'x1': x1,
+                'y1': y1,
+                'line': {
+                    'color': 'black',
+                    'width': 2,
+                },
+        },
+        {
+            'type': 'line',
+            'xref': 'x',
+            'yref': 'y',
+            'x0': x1,
+            'y0': y1,
+            'x1': x2,
+            'y1': y2,
+            'line': {
+                'color': 'black',
+                'width': 2,
+            },
+        },
+    ]
+    return(shape)
+
+
 #The bottom left corner of the subnet will be at the x and y coordinates supplied
 def PlotGatewayShape(DEBUG,x,y,textlist):
     size=0.5
@@ -1402,10 +1689,11 @@ def PlotGatewayShape(DEBUG,x,y,textlist):
             'y0': y,
             'x1': x+size,
             'y1': y+size,
+            'layer': 'below',
             'line': {
-                'color': 'rgba(50, 171, 96, .6)',
+                'color': 'rgba(50, 171, 96, 1)',
             },
-            'fillcolor': 'rgba(50, 171, 96, .6)',
+            'fillcolor': 'rgba(50, 171, 96, 1)',
         }
     ]
     return(data,shape)
@@ -1451,10 +1739,11 @@ def PlotRouterShape(DEBUG,x,y,gwlist):
             'y0': y,
             'x1': x+size,
             'y1': y+size,
+            'layer': 'below',
             'line': {
-                'color': 'rgba(50, 171, 96, .6)',
+                'color': 'rgba(4, 159, 217, 1)',
             },
-            'fillcolor': 'rgba(50, 171, 96, .6)',
+            'fillcolor': 'rgba(4, 159, 217, 1)',
         }
     ]
     return(data,shape)
@@ -1463,6 +1752,98 @@ def PlotRouterShape(DEBUG,x,y,gwlist):
 
 #The bottom left corner of the subnet will be at the x and y coordinates supplied
 def PlotNessusScanner(DEBUG,x,y,text):
+    size=0.4
+    polygonsize=0.055
+    #polygonpath="M"+str(x)+","+str(y)+" L"+str(x-polygonsize)+","+str(y+polygonsize)+" L"+str(x-polygonsize)+","+str(y+(polygonsize*2))+" L"+str(x)+","+str(y+(polygonsize*3))+" L"+str(x+polygonsize)+","+str(y+(polygonsize*3))+" L"+str(x+(polygonsize*2))+","+str(y+(polygonsize*2))+" L"+str(x+(polygonsize*2))+","+str(y+(polygonsize))+" L"+str(x+(polygonsize))+","+str(y)+" Z"
+    polygonpath="M"+str(x)+","+str(y)+" L"+str(x-polygonsize*4)+","+str(y+polygonsize)+" L"+str(x-polygonsize*5)+","+str(y+(polygonsize*5))+" L"+str(x-polygonsize*2)+","+str(y+(polygonsize*8))+" L"+str(x+polygonsize*2)+","+str(y+(polygonsize*7))+" L"+str(x+(polygonsize*3))+","+str(y+(polygonsize*3))+" Z"
+
+    data=[]
+
+    trace = go.Scatter(
+        x=[x-0.07],
+        y=[y+0.05+(size/2)],
+        text=["N"],
+        textfont=dict([('size', 32)]),
+        mode='text',
+        textposition='middle center',
+        hoverinfo='none',
+    )
+    data.append(trace)
+
+    trace = go.Scatter(
+        x=[x-0.07],
+        y=[y+0.175],
+        text=[text],
+        textfont=dict([('size', 6)]),
+        mode='text',
+        textposition='bottom center',
+        hoverinfo='none',
+
+    )
+    data.append(trace)
+
+
+    shape = [
+        {
+                'type': 'path',
+                'path': polygonpath,
+                'layer': 'below',
+                'line': {
+                    'color': 'rgba(50, 171, 96, 1)',
+                },
+                'fillcolor': 'rgba(50, 171, 96, 1)',
+      }
+    ]
+    return(data,shape)
+
+
+#The bottom left corner of the subnet will be at the x and y coordinates supplied
+def PlotNessusNetworkMonitor(DEBUG,x,y,text):
+    size=0.4
+    polygonsize=0.055
+    polygonpath="M"+str(x)+","+str(y)+" L"+str(x-polygonsize*4)+","+str(y+polygonsize)+" L"+str(x-polygonsize*5)+","+str(y+(polygonsize*5))+" L"+str(x-polygonsize*2)+","+str(y+(polygonsize*8))+" L"+str(x+polygonsize*2)+","+str(y+(polygonsize*7))+" L"+str(x+(polygonsize*3))+","+str(y+(polygonsize*3))+" Z"
+
+    data=[]
+
+    trace = go.Scatter(
+        x=[x-0.07],
+        y=[y+0.05+(size/2)],
+        text=["NNM"],
+        textfont=dict([('size', 24)]),
+        mode='text',
+        textposition='middle center',
+        hoverinfo='none',
+    )
+    data.append(trace)
+
+    trace = go.Scatter(
+        x=[x-0.07],
+        y=[y+0.175],
+        text=[text],
+        textfont=dict([('size', 6)]),
+        mode='text',
+        textposition='bottom center',
+        hoverinfo='none',
+
+    )
+    data.append(trace)
+
+
+    shape = [
+        {
+                'type': 'path',
+                'path': polygonpath,
+                'layer': 'below',
+                'line': {
+                    'color': 'rgba(128, 128, 128, 1)',
+                },
+                'fillcolor': 'rgba(128, 128, 128, 1)',
+      }
+    ]
+    return(data,shape)
+
+
+def OldPlotNessusScanner(DEBUG,x,y,text):
     size=0.4
 
     data=[]
@@ -1500,17 +1881,18 @@ def PlotNessusScanner(DEBUG,x,y,text):
                 'y0': y,
                 'x1': x+size,
                 'y1': y+size,
+                'layer': 'below',
                 'line': {
-                    'color': 'rgba(50, 171, 96, .6)',
+                    'color': 'rgba(50, 171, 96, 1)',
                 },
-                'fillcolor': 'rgba(50, 171, 96, .6)',
+                'fillcolor': 'rgba(50, 171, 96, 1)',
       }
     ]
     return(data,shape)
 
 #The bottom left corner of the subnet will be at the x and y coordinates supplied
 def PlotSubnetShape(DEBUG,x,y,text):
-    length=1.0
+    length=1.5
 
     trace0 = go.Scatter(
         x=[x+0.15],
@@ -1531,11 +1913,12 @@ def PlotSubnetShape(DEBUG,x,y,text):
                 'y0': y,
                 'x1': x+0.1+length,
                 'y1': y+0.1,
+                'layer': 'below',
                 'line': {
-                    'color': 'rgba(50, 171, 96, .6)',
+                    'color': 'rgba(50, 171, 96, 1)',
                     'width': 3,
                 },
-                'fillcolor': 'rgba(50, 171, 96, .6)',
+                'fillcolor': 'rgba(50, 171, 96, 1)',
             },
             # start (left) unfilled circle
             {
@@ -1546,8 +1929,9 @@ def PlotSubnetShape(DEBUG,x,y,text):
                 'y0': y,
                 'x1': x+0.1,
                 'y1': y+0.1,
+                'layer': 'below',
                 'line': {
-                    'color': 'rgba(50, 171, 96, .6)',
+                    'color': 'rgba(50, 171, 96, 1)',
                 },
                 'fillcolor': 'white',
             },
@@ -1560,11 +1944,14 @@ def PlotSubnetShape(DEBUG,x,y,text):
                 'y0': y,
                 'x1': x+0.15+length,
                 'y1': y+0.1,
+                'layer': 'below',
                 'line': {
-                    'color': 'rgba(50, 171, 96, .6)',
+                    'color': 'rgba(50, 171, 96, 1)',
                 },
-                'fillcolor': 'rgba(50, 171, 96, .6)',
+                'fillcolor': 'rgba(50, 171, 96, 1)',
             },
+
+
     ]
     data=[trace0]
     return(data,shape)
@@ -1585,129 +1972,156 @@ def PlotText(DEBUG,x,y,text):
     return(data)
 
 
-def CreateSubnetSummary(DEBUG, tenabledata,age):
-    connectorthickness = 0.5
-    connectorcolor = '#000'
-    nodesize = 10
-    xoffset = 0.05
-    subnetyoffset= -0.1
-    gatewayyoffset = -0.02
-    hostyoffset = -0.04
 
+#
+#This map draws an individual subnet, all aligned along 0 on the X-axis,
+# and each new subnet is an increment down the Y-axis.
+# From the subnet, draw a line out and then 90 degrees down.
+# From there, run a horizontal line across.  If there are any gateways,
+# put them here, incrementing the X position.
+# Also, if there are hosts, increment them along the X.
+#
+# The nodes are drawn separate from the connectors.
+#
+def CreateSubnetSummary(DEBUG,tenabledata,age,IGNOREEMPTYSUBNETS):
+    if DEBUG:
+        print("Plotting Subnet Overview")
     # build a blank graph
     G = nx.Graph()
 
-    nodecount=0
-    y=0
-    subnettext=[]
-    nodecolor=[]
+    if len(tenabledata['subnets']) >= 20:
+        graphwidth=640
+        graphheight=160*len(tenabledata['subnets'])/5
+        xrange=4
+        yrange=len(tenabledata['subnets'])/5
+    else:
+        graphwidth=640
+        graphheight=640
+        xrange=4
+        yrange=4
+
+
+    #initialize various variables
+    y=0.1
+    x=0.1
+    subnetyoffset=0.2
+    summarytext="<b>Subnet Overview</b>:"
+    netmaskcount={}
+    data = []
+    layout = {
+        'xaxis': {
+            'range': [0, xrange],
+            'visible': False,
+            'showline': False,
+            'zeroline': False,
+        },
+        'showlegend': False,
+        'yaxis': {
+            'range': [0, yrange],
+            'visible': False,
+            'showline': False,
+            'zeroline': False,
+        },
+        'width': graphwidth,
+        'height': graphheight,
+        'shapes': [],
+        'title': "Subnet Overview",
+        'titlefont': dict(size=16),
+        'hovermode': 'closest',
+        'margin': dict(b=20, l=5, r=5, t=40),
+        'annotations': [dict(
+            text="Generated by <a href='https://github.com/cybersmithio/networkmapper'> networkmapper.py</a>",
+            showarrow=False,
+            xref="paper", yref="paper",
+            x=0.005, y=-0.002)],
+    }
 
     #Go through all the subnets and put a node on the graph
     for (index,subnet) in tenabledata['subnets']:
+        #Find out how many IP addresses are on the subnet:
+        ipcount=0
+        for i in tenabledata['ipaddresses']:
+            if isinstance(i,ipaddress.IPv4Address):
+                if subnet.overlaps(ipaddress.IPv4Network(str(i)+"/32")):
+                    if DEBUG:
+                        print("IP addresss",i,"is part of subnet",subnet,"so adding to count")
+                    ipcount+=1
+            elif isinstance(i,ipaddress.IPv6Address):
+                if subnet.overlaps(ipaddress.IPv6Network(str(i)+"/128")):
+                    if DEBUG:
+                        print("IP addresss",i,"is part of subnet",subnet,"so adding to count")
+                    ipcount+=1
 
-        #New subnet, let's add a node.
-        G.add_node(index,pos=(0,y))
-        if DEBUG:
-            print("New node",nodecount," is the subnet",subnet)
-        subnetnode=nodecount
-        subnettext+= tuple([subnet])
-        nodecolor += tuple(["grey"])
-        #In case there is no gateway, reconnect the hosts back to the subnet
-        gatewaynode=nodecount
+        if IGNOREEMPTYSUBNETS == False or (IGNOREEMPTYSUBNETS==True and ipcount > 0):
+            #This subnet should be drawn (it is not 0, or drawing 0 host subnets are okay)
+            (text, shapeinfo) = PlotSubnetShape(DEBUG, x, y, str(subnet)+"  Total IPs: "+str(ipcount))
+            for i in shapeinfo:
+                layout['shapes'].append(i)
+            for i in text:
+                data.append(i)
 
-        #Done all the configuration needed for this node, so increment to the next
-        nodecount=nodecount+1
+            #Increment the y axis for the next subnet
+            y=y+subnetyoffset
 
-        y=y+subnetyoffset
+            #Pull out the subnet of this network and add it to the summary count
+            (dump,netmask)=re.split(r'\/', str(subnet), maxsplit=2)
+            try:
+                if DEBUG:
+                    print("Incrementing subnet count for /"+str(netmask))
+                netmaskcount[netmask]+=1
+            except:
+                if DEBUG:
+                    print("Initializing subnet count for /"+str(netmask))
+                netmaskcount[netmask]=1
 
+    #Create the summary text of all the subnet netmasks, and do a total for all subnets
+    subnetcount=0
+    for i in netmaskcount.keys():
+        summarytext=summarytext+"<br>/"+str(i)+" subnets: "+str(netmaskcount[i])
+        subnetcount+=netmaskcount[i]
+    summarytext=summarytext+"<br><br><b>Total subnets</b>: "+str(subnetcount)
 
-    pos = nx.get_node_attributes(G, 'pos')
+    if DEBUG:
+        print("Summary text for subnet diagram",summarytext)
 
-    dmin = 1
-    ncenter = 0
-    for n in pos:
-        x, y = pos[n]
-        d = (x - 0.5) ** 2 + (y - 0.5) ** 2
-        if d < dmin:
-            ncenter = n
-            dmin = d
+    layout['annotations']=[dict(
+            text="Generated by <a href='https://github.com/cybersmithio/networkmapper'>networkmapper.py</a>",
+            showarrow=False,
+            xref="paper", yref="paper",
+            x=0.005, y=-0.002),
+            dict(
+            text=summarytext,
+            showarrow=False,
+            width=200,
+            height=int((y-subnetyoffset)*160),
+            valign='middle',
+            align='left',
+            bgcolor='white',
+            borderwidth=3,
+            x=2,
+            y=0,
+            xanchor='left',
+            yanchor='bottom'
+            )]
 
-    p = nx.single_source_shortest_path_length(G, ncenter)
+    layout['yaxis'] =  {
+        'range': [0, y+1],
+        'visible': False,
+        'showline': False,
+        'zeroline': True,
+    }
+    layout['height']=(y+1)*160
 
-    edge_trace = go.Scatter(
-        x=[],
-        y=[],
-        line=dict(width=connectorthickness, color=connectorcolor),
-        hoverinfo='none',
-        mode='lines')
+    fig = go.Figure(data=data,
+                    layout=layout)
 
-    for edge in G.edges():
-        x0, y0 = G.node[edge[0]]['pos']
-        x1, y1 = G.node[edge[1]]['pos']
-        # print("x0=",x0)
-        # print("y0=",y0)
-        # print("x1=",x1)
-        # print("y1=",y1)
-        edge_trace['x'] += tuple([x0, x1, None])
-        edge_trace['y'] += tuple([y0, y1, None])
-
-    node_trace = go.Scatter(
-        x=[],
-        y=[],
-        text=subnettext,
-        textposition='bottom center',
-        hovertext=subnettext,
-        mode='markers+text',
-        hoverinfo='text',
-        marker=dict(
-            showscale=True,
-            # colorscale options
-            # 'Greys' | 'YlGnBu' | 'Greens' | 'YlOrRd' | 'Bluered' | 'RdBu' |
-            # 'Reds' | 'Blues' | 'Picnic' | 'Rainbow' | 'Portland' | 'Jet' |
-            # 'Hot' | 'Blackbody' | 'Earth' | 'Electric' | 'Viridis' |
-            colorscale='YlGnBu',
-            reversescale=True,
-            color=nodecolor,
-
-            size=nodesize,
-            colorbar=dict(
-                thickness=15,
-                title='Node Connections',
-                xanchor='left',
-                titleside='right'
-            ),
-            line=dict(width=2)))
-
-    for node in G.nodes():
-        x, y = G.node[node]['pos']
-        node_trace['x'] += tuple([x])
-        node_trace['y'] += tuple([y])
-
-    for node, adjacencies in enumerate(G.adjacency()):
-        # node_trace['marker']['color'] += tuple([len(adjacencies[1])])
-        node_info = '# of connections: ' + str(len(adjacencies[1]))
-        # node_trace['text'] += tuple([node_info])
-
-    fig = go.Figure(data=[edge_trace, node_trace],
-                    layout=go.Layout(
-                        title='<br>Overview of subnets',
-                        titlefont=dict(size=16),
-                        showlegend=False,
-                        hovermode='closest',
-                        margin=dict(b=20, l=5, r=5, t=40),
-                        annotations=[dict(
-                            text="Python code: <a href='https://plot.ly/ipython-notebooks/network-graphs/'> https://plot.ly/ipython-notebooks/network-graphs/</a>",
-                            showarrow=False,
-                            xref="paper", yref="paper",
-                            x=0.005, y=-0.002)],
-                        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)))
-
-    #Open the graph in a browser window
+    # Open the graph in a browser window
     plotly.offline.plot(fig, auto_open=True)
 
 
 def AnalyzeFreeAddresses(DEBUG,tenabledata):
+    if DEBUG:
+        print("Going through hosts without a subnet, and creating classful subnets")
 
     freeaddresses=[]
     for address in tenabledata['ipaddresses']:
@@ -1780,23 +2194,30 @@ parser.add_argument('--host',help="The Tenable.io host. (Default is cloud.tenabl
 parser.add_argument('--port',help="The Tenable.io port. (Default is 443)",nargs=1,action="store")
 parser.add_argument('--debug',help="Turn on debugging",action="store_true")
 parser.add_argument('--testpattern',help="Draw a test pattern",action="store_true")
-parser.add_argument('--outputfile',help="A file to dump all the raw data into, for debugging or offline use.",nargs=1,action="store")
+parser.add_argument('--outfile',help="A file to dump all the raw data into, for debugging or offline use.",nargs=1,action="store")
 parser.add_argument('--offlinefile',help="A file from a previous run of the networkmapper, which can be used to generate a map offline.",nargs=1,action="store")
-parser.add_argument('--excludepublic',help="Do not include public IPv4 ranges when mapping",action="store_true")
+parser.add_argument('--exclude-public',help="Do not include public IPv4 ranges when mapping",action="store_true")
+parser.add_argument('--ignore-empty-subnets',help="Do not include subnets that do not have any hosts detected",action="store_true")
 parser.add_argument('--age',help="The maximum age in days of the Tenable data to use.",nargs=1,action="store")
 
 args=parser.parse_args()
 
 DEBUG=False
 EXCLUDEPUBLIC=False
+IGNOREEMPTYSUBNETS=False
 
 if args.debug:
     DEBUG=True
     print("Debugging is enabled.")
 
-if args.excludepublic:
+if args.exclude_public:
     EXCLUDEPUBLIC=True
     print("Excluding public IP addresses and subnets.")
+
+if args.ignore_empty_subnets:
+    IGNOREEMPTYSUBNETS=True
+    print("Ignoring empty subnets.")
+
 
 if args.testpattern:
     CreateTestPattern(DEBUG)
@@ -1830,6 +2251,11 @@ try:
 except:
     nop = 0
 
+if os.getenv('SC_USERNAME') is None:
+    username = ""
+else:
+    username = os.getenv('SC_USERNAME')
+
 try:
     if args.username[0] != "":
         username = args.username[0]
@@ -1839,6 +2265,10 @@ try:
 except:
     username=""
 
+if os.getenv('SC_PASSWORD') is None:
+    username = ""
+else:
+    username = os.getenv('SC_PASSWORD')
 
 try:
     if args.password[0] != "":
@@ -1860,13 +2290,12 @@ except:
 
 
 
-outputfile = None
+outfile = None
 try:
-    if args.outputfile[0] != "":
-        outputfile = args.outputfile[0]
+    if args.outfile[0] != "":
+        outfile = args.outfile[0]
 except:
-#    outputfile = "networkmapper.temp"
-    outputfile = None
+    outfile = None
 
 
 offlinefile = None
@@ -1924,7 +2353,7 @@ if offlinefile == None:
     if conn == False:
         print("There was a problem connecting.")
         exit(-1)
-    tenabledata=GatherInfo(DEBUG,outputfile,conn,tenabledata,EXCLUDEPUBLIC,age)
+    tenabledata=GatherInfo(DEBUG,outfile,conn,tenabledata,EXCLUDEPUBLIC,age)
 else:
     tenabledata=ParseOfflineFile(DEBUG,offlinefile)
 
@@ -1935,9 +2364,9 @@ tenabledata=AnalyzeRouters(DEBUG,tenabledata)
 
 tenabledata=MatchRoutersToAssets(DEBUG,tenabledata)
 
-CreateSubnetSummary(DEBUG, tenabledata,age)
-CreateMapPlot(DEBUG, tenabledata,age)
-CreateMapPlotRouters(DEBUG, tenabledata,age)
+CreateSubnetSummary(DEBUG, tenabledata,age,IGNOREEMPTYSUBNETS)
+#CreateMapPlot(DEBUG, tenabledata,age)
+CreateMapPlotRouters(DEBUG, tenabledata,age,IGNOREEMPTYSUBNETS)
 
 exit(0)
 
