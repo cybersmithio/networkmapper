@@ -2,9 +2,23 @@
 
 This script pulls data out of a Tenable product and generates a network map using Plotly. It works with either Tenable.io or Tenable.sc.
 
-
 This is using pyTenable, so be sure you have that installed: https://pytenable.readthedocs.io/en/stable/index.html
 
+# Capabilitites
+
+So what can the networkmapper do for you?  Here are the current capabilities:
+* Identify and draw subnets from data in your Tenable products.
+* Identify and draw gateways from data in your Tenable products.
+* Identify and draw hosts from data in your Tenable products.
+* Identify and draw Nessus sensors within your environment.
+* Anonymize the maps drawn by removing IP address information.
+* Color code the subnets and hosts to show the highest level of vulnerability severity in your environment.
+* Color code the subnets and hosts to show the spectrum of vulnerabilities in your environment.
+* Exclude drawing subnets that do not have any hosts.
+* Exclude drawing subnets or hosts with public IP addresses.
+* Dump the relevant data gathered from your Tenable products to a file.
+* Create a map from a previous data dump.
+* Only use data of a certain age or less to generate the map.
 
 # Quick start
 This will generate a standard network map using best practices.
